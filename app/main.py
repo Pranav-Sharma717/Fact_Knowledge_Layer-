@@ -180,45 +180,52 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
         doc_filename = doc_row["filename"]
 
         cursor.execute("SELECT id, text, page_number FROM chunks WHERE document_id = ? ORDER BY chunk_index ASC", (doc_id,))
-        chunks = cursor.fetchall()
+        chunks = [dict(r) for r in cursor.fetchall()]
         if not chunks:
             raise HTTPException(status_code=404, detail="No chunks found for this document ID.")
-    finally:
-        conn.close()
-        
-    all_valid_facts = []
-    all_rejected = []
-    extraction_methods = []
-    combined_warnings = []
-    
-    for chunk in chunks:
-        c_id = chunk["id"]
-        c_text = chunk["text"]
-        p_num = chunk["page_number"]
-        
-        valid_facts, rejected_list, method, warnings = extract_facts_from_chunk(
-            c_text, p_num, api_key=api_key, model=model, doc_filename=doc_filename
-        )
-        
-        extraction_methods.append(method)
-        combined_warnings.extend(warnings)
-        
-        for vf in valid_facts:
-            all_valid_facts.append((c_id, vf))
-        for rj in rejected_list:
-            all_rejected.append(rj)
-            
-    overall_mode = "degraded" if "fallback" in extraction_methods else "normal"
-    unique_warnings = list(dict.fromkeys(combined_warnings))
 
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
+        all_valid_facts = []
+        all_rejected = []
+        extraction_methods = []
+        combined_warnings = []
+        
+        for chunk in chunks:
+            c_id = chunk["id"]
+            c_text = chunk["text"]
+            p_num = chunk["page_number"]
+            
+            valid_facts, rejected_list, method, warnings = extract_facts_from_chunk(
+                c_text, p_num, api_key=api_key, model=model, doc_filename=doc_filename
+            )
+            
+            extraction_methods.append(method)
+            combined_warnings.extend(warnings)
+            
+            for vf in valid_facts:
+                all_valid_facts.append((c_id, vf))
+            for rj in rejected_list:
+                all_rejected.append(rj)
+                
+        overall_mode = "degraded" if "fallback" in extraction_methods else "normal"
+        unique_warnings = list(dict.fromkeys(combined_warnings))
+
+        # Clean up existing data for this document (relationships first due to FK constraints)
+        cursor.execute("""
+            DELETE FROM fact_relationships
+            WHERE fact_id_a IN (SELECT id FROM facts WHERE document_id = ?)
+               OR fact_id_b IN (SELECT id FROM facts WHERE document_id = ?)
+        """, (doc_id, doc_id))
         cursor.execute("DELETE FROM facts WHERE document_id = ?", (doc_id,))
         cursor.execute("DELETE FROM rejected_extractions WHERE document_id = ?", (doc_id,))
+
+        # Verify chunks still exist before inserting facts
+        cursor.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_id,))
+        valid_chunk_ids = {row["id"] for row in cursor.fetchall()}
         
         saved_facts = []
         for c_id, f in all_valid_facts:
+            if c_id not in valid_chunk_ids:
+                continue  # Skip facts whose chunk was deleted mid-extraction
             subj = f.get("subject") or f.get("entity") or "Unknown Entity"
             ent = f.get("entity") or f.get("subject") or "Unknown Entity"
             cursor.execute(
@@ -270,6 +277,11 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
             facts=saved_facts,
             rejected_extractions=saved_rejected
         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
     finally:
         conn.close()
 

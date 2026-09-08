@@ -462,18 +462,41 @@
 
         async function uploadFile(file) {
             if (!file) return;
+            const dropzone = document.querySelector('.dropzone');
+            const origHTML = dropzone.innerHTML;
+            dropzone.innerHTML = '<p style="font-weight:600;color:var(--primary);">⏳ Uploading PDF...</p>';
+
             const formData = new FormData();
             formData.append('file', file);
+
+            let docId = null;
             try {
                 const data = await fetchJson('/upload', { method: 'POST', body: formData });
-                const extData = await fetchJson(`/extract/${data.doc_id}`, { method: 'POST' });
+                docId = data.doc_id;
+            } catch (e) {
+                dropzone.innerHTML = origHTML;
+                document.getElementById('fileInput').value = '';
+                alert("Upload failed: " + e.message);
+                return;
+            }
+
+            // Upload succeeded — refresh to show the document card immediately
+            await refreshData();
+
+            // Now extract facts (separate step — doc is already saved)
+            dropzone.innerHTML = '<p style="font-weight:600;color:var(--warning);">🔍 Extracting facts...</p>';
+            try {
+                const extData = await fetchJson(`/extract/${docId}`, { method: 'POST' });
                 if (extData.mode === 'degraded') {
                     document.getElementById('degradedBanner').style.display = 'flex';
                 }
-                refreshData();
             } catch (e) {
-                alert("Upload failed: " + e.message);
+                alert("Document uploaded, but fact extraction failed: " + e.message + "\n\nYou can retry by clicking 'Extract Facts' on the document card.");
             }
+
+            dropzone.innerHTML = origHTML;
+            document.getElementById('fileInput').value = '';
+            refreshData();
         }
 
         async function deleteDoc(docId) {
