@@ -30,7 +30,6 @@ def parse_raw_numeric(val_str: str) -> Optional[float]:
     """Extracts first float/int value from raw value string."""
     if not val_str:
         return None
-    # Find match like 81,415.38 or 289.20 or 740 or -15.5
     match = re.search(r'[-+]?\d+(?:,\d+)*(?:\.\d+)?', val_str)
     if match:
         clean_num = match.group(0).replace(',', '')
@@ -43,24 +42,17 @@ def parse_raw_numeric(val_str: str) -> Optional[float]:
 def normalize_fact(fact: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalizes numeric values and units generically for currency, volumes, percentages.
-    Returns dict with:
-      - raw_value
-      - numeric_value
-      - unit
-      - normalized_value
-      - normalized_unit
-      - explanation
-      - success
+    Prevents false scaling from distant keywords in raw_quote.
     """
     raw_val = str(fact.get("value", "")).strip()
     raw_unit = str(fact.get("unit", "") or "").strip()
     raw_quote = str(fact.get("raw_quote", "") or "").strip()
     
-    combined_text = f"{raw_val} {raw_unit} {raw_quote}".lower()
+    val_unit_text = f"{raw_val} {raw_unit}".lower()
     
     num_val = parse_raw_numeric(raw_val)
     if num_val is None:
-        num_val = parse_raw_numeric(raw_unit) or parse_raw_numeric(raw_quote)
+        num_val = parse_raw_numeric(raw_unit)
         
     if num_val is None:
         return {
@@ -73,38 +65,52 @@ def normalize_fact(fact: Dict[str, Any]) -> Dict[str, Any]:
             "success": False
         }
         
-    # Check currency
+    # 1. Check currency in value/unit first, then quote
     detected_currency = None
     for k, v in CURRENCY_MAP.items():
-        if k in combined_text:
+        if k in val_unit_text:
             detected_currency = v
             break
+    if not detected_currency:
+        for k, v in CURRENCY_MAP.items():
+            if k in raw_quote.lower():
+                detected_currency = v
+                break
             
-    # Check magnitude multiplier
+    # 2. Check magnitude multiplier in value/unit first
     multiplier = 1.0
     detected_mag = None
     
-    # Sort magnitude keys by length descending to match 'million' before 'm'
     sorted_mags = sorted(MAGNITUDE_MULTIPLIERS.keys(), key=len, reverse=True)
     for mag_key in sorted_mags:
-        # Match whole word or symbol
         pattern = r'\b' + re.escape(mag_key) + r'\b'
-        if re.search(pattern, combined_text):
+        if re.search(pattern, val_unit_text):
             multiplier = MAGNITUDE_MULTIPLIERS[mag_key]
             detected_mag = mag_key
             break
             
+    # Check near-proximity in raw_quote only if not found in value/unit
+    if not detected_mag and raw_quote and num_val is not None:
+        val_clean_escaped = re.escape(raw_val)
+        for mag_key in sorted_mags:
+            near_pattern = r'\b' + val_clean_escaped + r'[\s\w]{0,20}\b' + re.escape(mag_key) + r'\b'
+            if re.search(near_pattern, raw_quote, re.IGNORECASE):
+                multiplier = MAGNITUDE_MULTIPLIERS[mag_key]
+                detected_mag = mag_key
+                break
+
     norm_val = num_val * multiplier
     
     if not detected_currency and detected_mag in {"crore", "cr", "lakh", "lacs", "lac"}:
         detected_currency = "INR"
     
     # Determine normalized unit
-    if "%" in combined_text or "percent" in combined_text or "percentage" in combined_text:
+    combined_val_unit = f"{val_unit_text} {detected_mag or ''}".lower()
+    if "%" in combined_val_unit or "percent" in combined_val_unit or "percentage" in combined_val_unit:
         norm_unit = "%"
-    elif "parcel" in combined_text or "order" in combined_text or "shipment" in combined_text:
+    elif "parcel" in combined_val_unit or "order" in combined_val_unit or "shipment" in combined_val_unit:
         norm_unit = "parcels"
-    elif "employee" in combined_text or "headcount" in combined_text or "worker" in combined_text or "staff" in combined_text:
+    elif "employee" in combined_val_unit or "headcount" in combined_val_unit or "worker" in combined_val_unit or "staff" in combined_val_unit:
         norm_unit = "employees"
     elif detected_currency:
         norm_unit = detected_currency

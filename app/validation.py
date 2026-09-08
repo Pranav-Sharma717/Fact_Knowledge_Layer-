@@ -9,7 +9,11 @@ HEADER_PATTERNS = [
     r'^fy\d{2}(?:\s+fy\d{2})+$',
     r'^\(?\s*₹\s*in\s+million\s*\)?$',
     r'^\(?\s*rs\.?\s*in\s+million\s*\)?$',
-    r'^(?:million|billion|crore|lakh|thousand|\%|₹|\$)$'
+    r'^(?:million|billion|crore|lakh|thousand|\%|₹|\$)$',
+    r'^.*book\s+built\s+offer.*$',
+    r'^.*exchange\s+board\s+of\s+india.*$',
+    r'^.*issue\s+of\s+capital.*$',
+    r'^.*tax\s+benefits.*$'
 ]
 
 UNIT_KEYWORDS = {
@@ -20,7 +24,9 @@ UNIT_KEYWORDS = {
 GENERIC_METRICS = {
     "general metric", "general assertion", "table header", "table unit header",
     "particulars", "unknown metric", "statement", "document claim", "note", "amount",
-    "value", "item", "total", "subtotal", "figure"
+    "value", "item", "total", "subtotal", "figure", "exchange board of india",
+    "book built offer", "issue of capital and disclosure requirements", "draft red herring prospectus",
+    "special tax benefits", "inter-se allocation of responsibilities", "equity shares aggregating"
 }
 
 GENERIC_SUBJECTS = {
@@ -33,11 +39,11 @@ GENERIC_PREDICATES = {
 }
 
 def is_header_or_unit_label(text: str) -> bool:
-    """Checks if text is merely a table header, unit label, or column title."""
+    """Checks if text is merely a table header, unit label, column title, or prospectus header."""
     if not text:
-        return True
+        return False
     clean = text.strip().lower()
-    if clean in UNIT_KEYWORDS or clean in GENERIC_METRICS:
+    if clean in UNIT_KEYWORDS or clean in GENERIC_METRICS or clean.startswith("#"):
         return True
     for pattern in HEADER_PATTERNS:
         if re.match(pattern, clean):
@@ -72,11 +78,11 @@ def validate_fact_candidate(fact: Dict[str, Any]) -> Dict[str, Any]:
         }
         
     # 2. Bare table header / unit label check in value or quote
-    if is_header_or_unit_label(value) or is_header_or_unit_label(quote):
+    if is_header_or_unit_label(value) or is_header_or_unit_label(quote) or is_header_or_unit_label(metric):
         return {
             "valid": False,
             "failure_type": "TABLE_HEADER_WITHOUT_VALUE",
-            "rejection_reason": f"Detected a table-wide unit label or header ('{value or quote}') without associated entity or metric.",
+            "rejection_reason": f"Detected a table header or regulatory title ('{metric or value or quote}') without associated metric quantity.",
             "warnings": ["Bare table header or unit label"]
         }
         
@@ -91,17 +97,16 @@ def validate_fact_candidate(fact: Dict[str, Any]) -> Dict[str, Any]:
 
     # 4. Generic metric check (General Metric, Table Header, Particulars, etc.)
     clean_metric = metric.lower().strip()
-    if not clean_metric or clean_metric in GENERIC_METRICS or clean_metric in UNIT_KEYWORDS:
+    if not clean_metric or clean_metric in GENERIC_METRICS or clean_metric in UNIT_KEYWORDS or clean_metric.startswith("#"):
         return {
             "valid": False,
             "failure_type": "VALUE_WITHOUT_METRIC",
-            "rejection_reason": f"Fact candidate metric is generic or invalid ('{metric}') without specific financial/operational metric context.",
+            "rejection_reason": f"Fact candidate metric is generic or regulatory title ('{metric}') without specific financial/operational metric context.",
             "warnings": ["Generic or missing metric name"]
         }
 
     # 5. Non-numeric semantic noise filter
     if num_val is None:
-        # Check if value is just generic accounting prose without clear claim
         val_clean = value.lower().strip()
         if len(val_clean) < 5 or val_clean in {"through profit or loss", "see note", "n/a", "nil", "none", "refer note"}:
             return {
