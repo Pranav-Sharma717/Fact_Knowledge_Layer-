@@ -15,7 +15,7 @@ A production-grade Python + FastAPI system designed to extract discrete facts fr
                                                                   ▼
 ┌─────────────────┐     ┌───────────────────────┐     ┌───────────────────────┐
 │ Grounding Check │ <── │ LLM Fact Extraction   │ <── │ OpenRouter API        │
-│ Verbatim Quote  │     │ Emerging Vocab Schema │     │ (gemma-4-31b-it:free) │
+│ Verbatim Quote  │     │ Emerging Vocab Schema │     │ (100% Free LLM Model) │
 └─────────────────┘     └───────────────────────┘     └───────────────────────┘
          │
          ▼
@@ -31,7 +31,7 @@ A production-grade Python + FastAPI system designed to extract discrete facts fr
    - Stores exact `page_number` (1-indexed), `start_char`, and `end_char` offsets relative to page text in SQLite.
 
 2. **Open-Schema LLM Fact Extraction**:
-   - Structured JSON fact extraction per chunk via OpenRouter (`google/gemma-4-31b-it:free`).
+   - Structured JSON fact extraction per chunk via OpenRouter (`meta-llama/llama-3.3-70b-instruct:free`).
    - Extract fields: `{subject, predicate, value, unit, time_scope, raw_quote, page, extraction_confidence}`.
    - Predicates and subject vocabularies emerge dynamically from the text without hardcoded categories.
 
@@ -39,7 +39,7 @@ A production-grade Python + FastAPI system designed to extract discrete facts fr
    - Substring matching validates `raw_quote` against source chunk text.
    - Computes `grounding_confidence` (1.0 for exact match, 0.85 for normalized/trimmed match).
 
-4. **Vector Candidate Matching ($O(N)$ vs $O(N^2)$)**:
+4. **Vector Candidate Matching (O(N) vs O(N²))**:
    - Uses local `SentenceTransformers` (`all-MiniLM-L6-v2`) or TF-IDF cosine similarity to identify candidate fact pairs across documents.
    - Prevents calling the LLM on every pair of facts ($O(N^2)$), keeping analysis fast and cheap.
 
@@ -51,7 +51,9 @@ A production-grade Python + FastAPI system designed to extract discrete facts fr
 
 6. **Dynamic Confidence Rescoring**:
    - Recalculates final confidence:
-     $$\text{final\_confidence} = \text{clamp}(\text{extraction\_confidence} \times \text{grounding\_confidence} + \sum \Delta_{\text{relationships}}, 0.0, 1.0)$$
+     ```text
+     final_confidence = clamp(extraction_confidence * grounding_confidence + sum(confidence_deltas), 0.0, 1.0)
+     ```
 
 ---
 
@@ -81,7 +83,7 @@ pip install -r requirements.txt
 Copy `.env.example` to `.env` and insert your OpenRouter API key:
 ```env
 OPENROUTER_API_KEY=sk-or-v1-your-api-key-here
-OPENROUTER_MODEL=google/gemma-4-31b-it:free
+OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
 DB_PATH=fact_layer.db
 ```
 
@@ -123,6 +125,8 @@ python test_matching.py
 | `/` | `GET` | Serves the glassmorphism single-page Web UI |
 | `/upload` | `POST` | Accepts PDF file, parses into page-anchored chunks, saves to SQLite |
 | `/documents` | `GET` | Lists all uploaded documents and page counts |
+| `/documents/{doc_id}` | `DELETE` | Removes an unwanted document and its chunks & facts |
+| `/documents` | `DELETE` | Clears all documents and facts |
 | `/documents/{doc_id}/chunks` | `GET` | Retrieves page-anchored chunks with character offsets |
 | `/extract/{doc_id}` | `POST` | Triggers LLM fact extraction & evidence grounding for a document |
 | `/documents/{doc_id}/facts` | `GET` | Retrieves extracted facts for a specific document |
