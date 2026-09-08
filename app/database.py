@@ -103,7 +103,9 @@ def init_db():
         ("temporal_source_span", "TEXT"),
         ("extraction_method", "TEXT NOT NULL DEFAULT 'llm'"),
         ("validation_status", "TEXT NOT NULL DEFAULT 'valid'"),
-        ("validation_notes", "TEXT")
+        ("validation_notes", "TEXT"),
+        ("binding_method", "TEXT NOT NULL DEFAULT 'sentence_direct'"),
+        ("pipeline_version", "INTEGER NOT NULL DEFAULT 4")
     ]
     for col_name, col_def in needed_cols:
         if col_name not in existing_cols:
@@ -139,6 +141,7 @@ def init_db():
         can_compute_delta INTEGER NOT NULL DEFAULT 0,
         reconciliation_type TEXT NOT NULL DEFAULT 'NONE',
         match_checklist TEXT,
+        pipeline_version INTEGER NOT NULL DEFAULT 4,
         FOREIGN KEY (fact_id_a) REFERENCES facts (id) ON DELETE CASCADE,
         FOREIGN KEY (fact_id_b) REFERENCES facts (id) ON DELETE CASCADE
     );
@@ -161,6 +164,12 @@ def init_db():
         cursor.execute("ALTER TABLE fact_relationships ADD COLUMN reconciliation_type TEXT NOT NULL DEFAULT 'NONE';")
     if "match_checklist" not in rel_cols:
         cursor.execute("ALTER TABLE fact_relationships ADD COLUMN match_checklist TEXT;")
+    if "pipeline_version" not in rel_cols:
+        cursor.execute("ALTER TABLE fact_relationships ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 4;")
+
+    # Invalidate stale pipeline records from older software versions (User Review Fix 8)
+    cursor.execute("DELETE FROM fact_relationships WHERE pipeline_version < 4;")
+    cursor.execute("DELETE FROM facts WHERE pipeline_version < 4;")
 
     conn.commit()
     conn.close()

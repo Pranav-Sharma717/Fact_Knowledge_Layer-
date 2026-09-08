@@ -108,3 +108,39 @@ def classify_number_role(
 def is_metric_value_role(role: str) -> bool:
     """Returns True ONLY for roles that legitimately populate a metric value."""
     return role in METRIC_VALUE_ROLES
+
+def canonicalize_metric(metric_name: str) -> str:
+    """
+    Generic metric canonicalization strategy preserving critical semantic modifiers
+    (adjusted, margin, growth, net, gross, total, operating, segment, consolidated, standalone, yoy, qoq).
+    """
+    if not metric_name:
+        return "unspecified_metric"
+        
+    raw = metric_name.lower().strip()
+    # Normalize synonyms
+    raw = re.sub(r'\bpat\b', 'profit_after_tax', raw)
+    raw = re.sub(r'\bcpi\b', 'consumer_price_index', raw)
+    raw = re.sub(r'\bebita\b', 'ebitda', raw)
+
+    # Normalize punctuation and hyphens
+    clean = re.sub(r'[^a-z0-9\s_]', ' ', raw)
+    tokens = clean.split()
+    
+    # Generic stopwords that carry no semantic metric distinction
+    stopwords = {"the", "and", "of", "in", "for", "to", "a", "from", "on", "was", "reported", "as", "reached", "level", "figure", "data", "states", "shows", "claim", "company", "limited", "value"}
+    
+    canonical_tokens = []
+    for token in tokens:
+        if token in stopwords:
+            continue
+        # Normalize plurals
+        if token.endswith('s') and len(token) > 3 and not token.endswith(('ss', 'us', 'is', 'gross')):
+            token = token[:-1]
+        canonical_tokens.append(token)
+        
+    if not canonical_tokens:
+        return "unspecified_metric"
+        
+    return "_".join(canonical_tokens)
+

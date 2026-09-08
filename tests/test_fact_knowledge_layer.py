@@ -113,8 +113,8 @@ def test_reconciled_period_difference():
     }
     
     j_res = judge_relationship_mock(fact_a, fact_b)
-    assert j_res["relationship"] == "RECONCILED"
-    assert j_res["reconciliation_type"] == "PERIOD_DIFFERENCE"
+    assert j_res["relationship"] == "TEMPORAL_COMPARISON"
+    assert j_res["reconciliation_type"] == "HISTORICAL_TREND"
 
 def test_corroboration():
     fact_a = {

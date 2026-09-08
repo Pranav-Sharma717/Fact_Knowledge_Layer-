@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -14,7 +14,8 @@ from app.matching import (
     find_candidate_pairs, judge_relationship, recalculate_fact_confidences,
     calculate_comparability_score, can_compute_delta,
     TAXONOMY_CORROBORATES, TAXONOMY_CONTRADICTS, TAXONOMY_LIKELY_CONTRADICTION,
-    TAXONOMY_CONTEXTUAL_DIFFERENCE, TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING
+    TAXONOMY_CONTEXTUAL_DIFFERENCE, TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING,
+    TAXONOMY_TEMPORAL_COMPARISON, TAXONOMY_UNCERTAIN, TAXONOMY_UNRELATED, MIN_RELATIONSHIP_CONFIDENCE
 )
 from app.models import (
     UploadResponse, DocumentResponse, ChunkResponse,
@@ -227,8 +228,8 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
                     normalized_value, normalized_unit, period, as_of_date, scope, qualifiers,
                     raw_quote, page, extraction_confidence, grounding_confidence, value_binding_confidence,
                     final_confidence, value_type, is_numeric, value_source_span, metric_source_span,
-                    temporal_source_span, extraction_method, validation_status, validation_notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    temporal_source_span, extraction_method, binding_method, pipeline_version, validation_status, validation_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc_id, c_id, subj, ent, f.get("metric", "General Assertion"),
@@ -239,7 +240,8 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
                     f.get("value_binding_confidence", 1.0), f.get("final_confidence", 0.9),
                     f.get("value_type", "UNKNOWN"), 1 if f.get("is_numeric", True) else 0,
                     f.get("value_source_span"), f.get("metric_source_span"), f.get("temporal_source_span"),
-                    f.get("extraction_method", "llm"), f.get("validation_status", "valid"), f.get("validation_notes")
+                    f.get("extraction_method", "llm"), f.get("binding_method", "sentence_direct"), 4,
+                    f.get("validation_status", "valid"), f.get("validation_notes")
                 )
             )
             f_id = cursor.lastrowid
@@ -273,11 +275,17 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
 
 @app.get("/documents/{doc_id}/facts", response_model=List[FactItem])
 def get_facts_for_document(doc_id: str):
-    """Retrieve facts for a specific document."""
+    """Retrieve facts for a specific document with source filename."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM facts WHERE document_id = ? ORDER BY page ASC, id ASC", (doc_id,))
+        cursor.execute("""
+            SELECT f.*, d.filename as source_document
+            FROM facts f
+            JOIN documents d ON f.document_id = d.id
+            WHERE f.document_id = ?
+            ORDER BY f.page ASC, f.id ASC
+        """, (doc_id,))
         rows = cursor.fetchall()
         return [FactItem(**dict(r)) for r in rows]
     finally:
@@ -285,11 +293,16 @@ def get_facts_for_document(doc_id: str):
 
 @app.get("/facts", response_model=List[FactItem])
 def list_all_facts():
-    """List all extracted facts across all documents in SQLite."""
+    """Retrieve all extracted facts across all documents with human-readable source filename."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM facts ORDER BY id ASC")
+        cursor.execute("""
+            SELECT f.*, d.filename as source_document
+            FROM facts f
+            JOIN documents d ON f.document_id = d.id
+            ORDER BY f.page ASC, f.id ASC
+        """)
         rows = cursor.fetchall()
         return [FactItem(**dict(r)) for r in rows]
     finally:
@@ -380,47 +393,42 @@ def developer_debug_pipeline():
         conn.close()
 
 @app.post("/analyze", response_model=AnalysisResponse)
-def analyze_cross_document_relationships(
-    similarity_threshold: float = Query(0.35),
-    max_candidates: int = Query(50),
-    api_key: Optional[str] = Query(None)
-):
+def analyze_cross_document_relationships(api_key: Optional[str] = Header(None, alias="X-OpenRouter-Key")):
     """
-    Runs cross-document relationship detection with strict comparability hard gates,
-    taxonomy classification, and confidence updates.
+    Runs cross-document relationship discovery and updates confidence scores.
+    Enforces MIN_RELATIONSHIP_CONFIDENCE = 0.70 and canonical metric matching.
     """
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM facts ORDER BY id ASC")
-        facts_rows = cursor.fetchall()
-        facts = [dict(r) for r in facts_rows]
-    finally:
-        conn.close()
-        
-    if len(facts) < 2:
-        return AnalysisResponse(
-            candidate_pairs_evaluated=0, relationships_found_count=0,
-            corroborations_count=0, contradictions_count=0, likely_contradictions_count=0,
-            contextual_differences_count=0, reconciled_count=0, unrelated_count=0, uncertain_count=0,
-            relationships=[]
-        )
-        
-    candidate_pairs = find_candidate_pairs(facts, similarity_threshold=similarity_threshold, max_candidates=max_candidates)
+    facts = list_all_facts()
+    candidate_pairs = find_candidate_pairs([f.model_dump() for f in facts])
     
-    evaluated_results = []
     corroborations = 0
     contradictions = 0
     likely_contradictions = 0
     contextual_differences = 0
     reconciled = 0
+    temporal_comparisons = 0
     unrelated = 0
     uncertain = 0
-    
+
+    evaluated_results = []
+    seen_relationship_keys = set()
+
     for fact_a, fact_b, sim_score, passed_gates in candidate_pairs:
         judge_res = judge_relationship(fact_a, fact_b, api_key=api_key)
         rel_type = judge_res["relationship"]
         tax_cat = judge_res.get("taxonomy_category", rel_type)
+        conf = float(judge_res.get("confidence_delta", 0.85))
+        
+        # Enforce MIN_RELATIONSHIP_CONFIDENCE = 0.70 (User Review Fix 1)
+        if conf < MIN_RELATIONSHIP_CONFIDENCE:
+            rel_type = TAXONOMY_UNRELATED
+            tax_cat = TAXONOMY_UNRELATED
+
+        # Deduplicate relationships using canonical pair key (User Review Fix 17)
+        pair_key = (min(fact_a["id"], fact_b["id"]), max(fact_a["id"], fact_b["id"]), rel_type)
+        if pair_key in seen_relationship_keys:
+            continue
+        seen_relationship_keys.add(pair_key)
         
         if rel_type == TAXONOMY_CORROBORATES:
             corroborations += 1
@@ -430,6 +438,8 @@ def analyze_cross_document_relationships(
             likely_contradictions += 1
         elif rel_type == "RECONCILED" or tax_cat in {TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING}:
             reconciled += 1
+        elif tax_cat == TAXONOMY_TEMPORAL_COMPARISON or rel_type == TAXONOMY_TEMPORAL_COMPARISON:
+            temporal_comparisons += 1
         elif tax_cat == TAXONOMY_CONTEXTUAL_DIFFERENCE:
             contextual_differences += 1
         elif rel_type == TAXONOMY_UNRELATED:
@@ -441,7 +451,7 @@ def analyze_cross_document_relationships(
 
         evaluated_results.append((
             fact_a, fact_b, rel_type, tax_cat, judge_res["reasoning"],
-            judge_res["confidence_delta"], judge_res["comparison_delta"],
+            conf, judge_res["comparison_delta"],
             1 if judge_res.get("can_compute_delta", False) else 0,
             judge_res["reconciliation_type"], checklist_str
         ))
@@ -458,8 +468,8 @@ def analyze_cross_document_relationships(
                 INSERT INTO fact_relationships (
                     fact_id_a, fact_id_b, relationship_type, taxonomy_category, reasoning,
                     confidence, confidence_delta, comparison_delta, can_compute_delta,
-                    reconciliation_type, match_checklist
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reconciliation_type, match_checklist, pipeline_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 4)
                 """,
                 (fact_a["id"], fact_b["id"], rel_type, tax_cat, reasoning, conf_delta, conf_delta, comp_delta, can_comp, reconc_type, chklist)
             )
@@ -480,6 +490,7 @@ def analyze_cross_document_relationships(
                     can_compute_delta=bool(can_comp),
                     reconciliation_type=reconc_type,
                     match_checklist=chklist_list,
+                    pipeline_version=4,
                     fact_a=FactItem(**fact_a),
                     fact_b=FactItem(**fact_b)
                 )
@@ -494,7 +505,7 @@ def analyze_cross_document_relationships(
             "corroborations": corroborations,
             "contradictions": contradictions,
             "likely_contradictions": likely_contradictions,
-            "contextual_differences": contextual_differences,
+            "temporal_comparisons": temporal_comparisons,
             "reconciled": reconciled
         }
 
@@ -506,6 +517,7 @@ def analyze_cross_document_relationships(
             likely_contradictions_count=likely_contradictions,
             contextual_differences_count=contextual_differences,
             reconciled_count=reconciled,
+            temporal_comparisons_count=temporal_comparisons,
             unrelated_count=unrelated,
             uncertain_count=uncertain,
             relationships=relationships,
@@ -516,19 +528,27 @@ def analyze_cross_document_relationships(
 
 @app.get("/relationships", response_model=List[RelationshipItem])
 def list_relationships():
-    """List all detected cross-document relationships."""
+    """List all detected cross-document relationships with source filenames."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM fact_relationships ORDER BY id ASC")
+        cursor.execute("SELECT * FROM fact_relationships WHERE confidence >= ? ORDER BY id ASC", (MIN_RELATIONSHIP_CONFIDENCE,))
         rows = cursor.fetchall()
         
         results = []
         for r in rows:
             r_dict = dict(r)
-            cursor.execute("SELECT * FROM facts WHERE id = ?", (r_dict["fact_id_a"],))
+            cursor.execute("""
+                SELECT f.*, d.filename as source_document
+                FROM facts f JOIN documents d ON f.document_id = d.id
+                WHERE f.id = ?
+            """, (r_dict["fact_id_a"],))
             fa = cursor.fetchone()
-            cursor.execute("SELECT * FROM facts WHERE id = ?", (r_dict["fact_id_b"],))
+            cursor.execute("""
+                SELECT f.*, d.filename as source_document
+                FROM facts f JOIN documents d ON f.document_id = d.id
+                WHERE f.id = ?
+            """, (r_dict["fact_id_b"],))
             fb = cursor.fetchone()
             r_dict["fact_a"] = FactItem(**dict(fa)) if fa else None
             r_dict["fact_b"] = FactItem(**dict(fb)) if fb else None
@@ -544,12 +564,14 @@ def list_relationships():
         conn.close()
 
 def is_evaluator_quality_relationship(rel: RelationshipItem) -> bool:
-    """Evaluates strict quality gate before allowing a relationship into Evaluator Cases tab (Task 15)."""
+    """Evaluates strict backend quality gate before allowing a relationship into Evaluator Cases (User Review Fix 7)."""
     if not rel.fact_a or not rel.fact_b:
         return False
     if rel.fact_a.validation_status != "valid" or rel.fact_b.validation_status != "valid":
         return False
     if rel.fact_a.value_binding_confidence < 0.75 or rel.fact_b.value_binding_confidence < 0.75:
+        return False
+    if rel.confidence < MIN_RELATIONSHIP_CONFIDENCE:
         return False
     if not calculate_comparability_score(rel.fact_a.model_dump(), rel.fact_b.model_dump())[0]:
         return False
@@ -557,7 +579,7 @@ def is_evaluator_quality_relationship(rel: RelationshipItem) -> bool:
 
 @app.get("/cases", response_model=AssignmentCasesResponse)
 def get_submission_cases():
-    """Returns the 4 explicit submission cases gated by strict quality criteria (Task 15)."""
+    """Returns the 4 explicit submission cases gated by strict backend quality criteria (User Review Fix 7)."""
     rels = list_relationships()
     conn = get_db_connection()
     try:
@@ -571,9 +593,9 @@ def get_submission_cases():
     
     corr_case = next((r for r in quality_rels if r.relationship_type == TAXONOMY_CORROBORATES), None)
     contra_case = next((r for r in quality_rels if r.relationship_type in {TAXONOMY_CONTRADICTS, TAXONOMY_LIKELY_CONTRADICTION}), None)
-    reconc_case = next((r for r in quality_rels if r.relationship_type in {"RECONCILED", TAXONOMY_CONTEXTUAL_DIFFERENCE, TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING}), None)
+    reconc_case = next((r for r in quality_rels if r.relationship_type in {"RECONCILED", TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING}), None)
+    temporal_case = next((r for r in quality_rels if r.relationship_type == TAXONOMY_TEMPORAL_COMPARISON), None)
     
-    # Genuine extraction failure case
     failure_case = next((rj for rj in rejected if rj.failure_type == "TABLE_HEADER_WITHOUT_VALUE" or rj.candidate_text == "(₹ in million)"), None)
     if not failure_case and rejected:
         failure_case = rejected[0]
@@ -582,5 +604,6 @@ def get_submission_cases():
         corroborated_case=corr_case,
         likely_contradiction_case=contra_case,
         reconciled_case=reconc_case,
+        temporal_case=temporal_case,
         extraction_failure_case=failure_case
     )

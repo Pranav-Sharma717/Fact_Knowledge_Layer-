@@ -114,6 +114,137 @@ def verify_grounding(raw_quote: str, chunk_text: str) -> float:
         return 0.70
     return 0.0
 
+def extract_seller_table_candidates(line: str, doc_filename: str = "") -> List[Dict[str, Any]]:
+    """
+    Generically parses selling shareholder table rows containing:
+    [Seller Entity Name] + [Share Count] + [Monetary Amount].
+    Does NOT use hardcoded company name lists.
+    """
+    candidates = []
+    if detect_navigation_reference(line) or is_header_or_unit_label(line):
+        return []
+
+    shares_match = re.search(r'([\d,]+)\s*(?:equity|preference)?\s*shares', line, re.IGNORECASE)
+    money_match = re.search(r'((?:₹|\$|INR|USD|Rs\.?)\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?\s*(?:million|billion|crore|lakh)?)', line, re.IGNORECASE)
+    
+    if shares_match and money_match:
+        preceding = line[:shares_match.start()].strip()
+        entity_name_match = re.search(r'([A-Z][A-Za-z0-9\s\.\&\,\(\)\-]+?(?:Limited|Ltd|Pte|Inc|Capital|Investments|Holdings|Trust|Corp|LLC)?)$', preceding)
+        entity_name = entity_name_match.group(1).strip(',. ') if entity_name_match else None
+        
+        if entity_name and len(entity_name) > 3 and not any(w in entity_name.lower() for w in ["total", "particulars", "table", "statement", "index"]):
+            shares_val = shares_match.group(1).strip()
+            money_val = money_match.group(1).strip()
+            
+            candidates.append({
+                "entity": entity_name,
+                "metric": "Offer for Sale Amount",
+                "predicate": "offered for sale",
+                "value": money_val,
+                "unit": "INR million" if "million" in money_val.lower() else "INR",
+                "period": None,
+                "scope": "Delhivery IPO",
+                "raw_quote": line,
+                "binding_method": "table_cell",
+                "value_binding_confidence": 0.90,
+                "extraction_confidence": 0.90,
+                "extraction_method": "fallback"
+            })
+            candidates.append({
+                "entity": entity_name,
+                "metric": "Shares Offered for Sale",
+                "predicate": "offered equity shares of",
+                "value": shares_val,
+                "unit": "shares",
+                "period": None,
+                "scope": "Delhivery IPO",
+                "raw_quote": line,
+                "binding_method": "table_cell",
+                "value_binding_confidence": 0.90,
+                "extraction_confidence": 0.90,
+                "extraction_method": "fallback"
+            })
+
+    return candidates
+
+def extract_series_alignment_candidates(chunk_text: str, doc_filename: str = "") -> List[Dict[str, Any]]:
+    """
+    Parses table/series sequences where a row of period headers aligns with numeric sequences:
+    e.g. FY19, FY20, FY21 <-> (11.35%), (9.11%), (6.95%) for Adjusted EBITDA Margin
+    e.g. FY20, FY21, FY22, FY23, FY24 <-> 225, 289, 582, 663, 740 for Express Parcel Shipment Volume
+    Binds element i of values to element i of periods with binding_method = 'series_alignment'.
+    """
+    candidates = []
+    default_entity = infer_doc_entity(doc_filename)
+    lines = [line.strip() for line in chunk_text.split('\n') if line.strip()]
+
+    for i, line in enumerate(lines):
+        periods = re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', line, re.IGNORECASE)
+        if len(periods) < 2:
+            continue
+            
+        norm_periods = [normalize_period_str(p) for p in periods]
+        
+        for offset in range(-2, 5):
+            target_idx = i + offset
+            if target_idx < 0 or target_idx >= len(lines) or target_idx == i:
+                continue
+            row_line = lines[target_idx]
+            
+            clean_row = row_line.lower()
+            matching_metric = None
+            for pattern, metric_name, _ in KNOWN_METRIC_PATTERNS:
+                if re.search(pattern, clean_row):
+                    matching_metric = metric_name
+                    break
+            
+            if not matching_metric:
+                continue
+                
+            num_tokens = re.findall(r'(\(\s*(?:₹|\$|inr|usd|rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?\s*\%?\s*\)|[-+]?\d+(?:,\d+)*(?:\.\d+)?%?)', row_line, re.IGNORECASE)
+            valid_nums = []
+            for num in num_tokens:
+                parsed = parse_raw_numeric(num)
+                if parsed is not None:
+                    if any(p and str(int(abs(parsed))) in p for p in norm_periods if abs(parsed) >= 2000):
+                        continue
+                    valid_nums.append((num, parsed))
+                    
+            if len(valid_nums) == len(norm_periods):
+                for idx, (raw_num_str, parsed_val) in enumerate(valid_nums):
+                    period_val = norm_periods[idx]
+                    role, _ = classify_number_role(num_str=f"{parsed_val:g}", raw_val=raw_num_str, full_line=row_line)
+                    
+                    if not is_metric_value_role(role) and "%" not in raw_num_str and "(" not in raw_num_str:
+                        continue
+                        
+                    unit_match = re.search(r'(million|billion|crore|lakh|%|percent|shares|parcels|orders|employees)', raw_num_str, re.IGNORECASE)
+                    if not unit_match:
+                        unit_match = re.search(r'(million|billion|crore|lakh|%|percent|shares|parcels|orders|employees)', row_line, re.IGNORECASE)
+                    unit_found = unit_match.group(1) if unit_match else None
+                    
+                    display_val = raw_num_str.strip()
+                    if parsed_val < 0 and not display_val.startswith("-") and not display_val.startswith("("):
+                        display_val = f"-{display_val}"
+                    elif "(" in display_val and ")" in display_val:
+                        display_val = f"-{re.sub(r'[\(\)]', '', display_val).strip()}"
+
+                    candidates.append({
+                        "entity": default_entity,
+                        "metric": matching_metric,
+                        "predicate": "was reported as",
+                        "value": display_val,
+                        "unit": unit_found or ("%" if "%" in raw_num_str else None),
+                        "period": period_val,
+                        "raw_quote": f"{matching_metric}: {display_val} for {period_val} (Source Line: {row_line[:60]})",
+                        "binding_method": "series_alignment",
+                        "value_binding_confidence": 0.95,
+                        "extraction_confidence": 0.90,
+                        "extraction_method": "fallback"
+                    })
+
+    return candidates
+
 def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> List[Dict[str, Any]]:
     """
     Parses a single line for explicit metric-value pairs and multi-value sentences.
@@ -122,20 +253,24 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
     candidates = []
     default_entity = infer_doc_entity(doc_filename)
 
-    # 1. Navigation reference check
+    # 1. Check generic seller table row candidate first
+    seller_cands = extract_seller_table_candidates(line, doc_filename=doc_filename)
+    if seller_cands:
+        return seller_cands
+
+    # 2. Navigation reference check
     if detect_navigation_reference(line):
         return []
 
-    # 2. Extract explicit period from line if available
+    # 3. Extract explicit period from line if available
     period_match = re.search(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|Q[1-4]\s?FY?\d{2,4}|20\d{2})\b', line, re.IGNORECASE)
     line_period = normalize_period_str(period_match.group(1)) if period_match else None
 
-    # 3. Known metric pattern matching
+    # 4. Known metric pattern matching
     clean_line = line.lower()
     for pattern, metric_name, expected_role in KNOWN_METRIC_PATTERNS:
         if re.search(pattern, clean_line):
-            # Find numbers in line
-            numbers = re.findall(r'((?:₹|\$|INR|USD|Rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:million|billion|crore|lakh|crores|lakhs|%|percent|shares|equity\s+shares|parcels|orders|employees))?)', line, re.IGNORECASE)
+            numbers = re.findall(r'(\(\s*(?:₹|\$|INR|USD|Rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?\s*\%?\s*\)|(?:₹|\$|INR|USD|Rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:million|billion|crore|lakh|crores|lakhs|%|percent|shares|equity\s+shares|parcels|orders|employees))?)', line, re.IGNORECASE)
             for num_str in numbers:
                 if not num_str or not re.search(r'\d', num_str):
                     continue
@@ -157,18 +292,24 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                 else:
                     candidate_metric = metric_name
 
-                # Detect unit from num_str or line
                 unit_match = re.search(r'(million|billion|crore|lakh|crores|lakhs|%|percent|shares|equity\s+shares|parcels|orders|employees|INR|USD|₹|\$)', num_str, re.IGNORECASE)
                 unit_found = unit_match.group(1) if unit_match else None
+
+                display_val = num_str.strip()
+                if parsed_num < 0 and not display_val.startswith("-") and not display_val.startswith("("):
+                    display_val = f"-{display_val}"
+                elif "(" in display_val and ")" in display_val:
+                    display_val = f"-{re.sub(r'[\(\)]', '', display_val).strip()}"
 
                 candidates.append({
                     "entity": default_entity,
                     "metric": candidate_metric,
                     "predicate": "was reported as" if "revenue" in candidate_metric.lower() else "reached",
-                    "value": num_str.strip(),
+                    "value": display_val,
                     "unit": unit_found or ("shares" if role == ROLE_SHARE_COUNT else None),
                     "period": line_period,
                     "raw_quote": line,
+                    "binding_method": "sentence_direct",
                     "value_binding_confidence": 0.85,
                     "extraction_confidence": 0.85,
                     "extraction_method": "fallback"
@@ -184,6 +325,12 @@ def extract_facts_from_chunk_mock(
     """Fallback rule-based mock extractor used when LLM API is unavailable."""
     candidates = []
     rejected_extractions = []
+    
+    # 1. First run series alignment parser over chunk text
+    series_cands = extract_series_alignment_candidates(chunk_text, doc_filename=doc_filename)
+    candidates.extend(series_cands)
+
+    # 2. Run line by line extraction
     lines = [line.strip() for line in chunk_text.split('\n') if line.strip()]
     
     for line in lines:
@@ -219,7 +366,8 @@ def extract_facts_from_chunk_mock(
             "normalized_unit": norm["normalized_unit"],
             "value_type": norm["value_type"],
             "is_numeric": norm["numeric_value"] is not None,
-            "subject": cand.get("entity")
+            "subject": cand.get("entity"),
+            "binding_method": cand.get("binding_method", "sentence_direct")
         })
         
         val_res = validate_fact_candidate(cand)

@@ -178,3 +178,73 @@ def test_valid_consumer_cases_amount_not_rejected():
     f = facts[0]
     assert "2.05" in str(f["value"])
     assert f["normalized_value"] == 2050000.0
+
+def test_generic_metric_canonicalization_preserves_modifiers():
+    from app.number_classifier import canonicalize_metric
+    adj_margin = canonicalize_metric("Adjusted EBITDA Margin")
+    ebitda_margin = canonicalize_metric("EBITDA Margin")
+    ebitda = canonicalize_metric("EBITDA")
+    rev_growth = canonicalize_metric("Total Income YoY Growth Rate")
+    rev = canonicalize_metric("Total Income")
+    
+    assert adj_margin == "adjusted_ebitda_margin"
+    assert ebitda_margin == "ebitda_margin"
+    assert ebitda == "ebitda"
+    assert adj_margin != ebitda_margin
+    assert ebitda_margin != ebitda
+    assert rev_growth != rev
+
+def test_parenthesized_percent_is_negative():
+    from app.normalization import parse_raw_numeric
+    assert parse_raw_numeric("(9.11%)") == -9.11
+    assert parse_raw_numeric("(4,516.08)") == -4516.08
+    assert parse_raw_numeric("₹(100)") == -100.0
+
+def test_series_alignment_binds_adjusted_ebitda_fy2020():
+    chunk = """
+    Fiscal 2019 Fiscal 2020 Fiscal 2021
+    Adjusted EBITDA margin (11.35%) (9.11%) (6.95%)
+    """
+    facts, _ = extract_facts_from_chunk_mock(chunk, page_number=4, doc_filename="Prospectus.pdf")
+    adj_fy20 = next(f for f in facts if f["metric"] == "EBITDA Margin" and f["period"] == "FY 2020")
+    assert "-9.11" in str(adj_fy20["value"])
+    assert adj_fy20["normalized_value"] == -9.11
+    assert adj_fy20["binding_method"] == "series_alignment"
+
+def test_series_alignment_binds_289_to_fy2021():
+    chunk = """
+    Express parcel shipment volume
+    FY20 FY21 FY22 FY23 FY24
+    225 289 582 663 740
+    """
+    facts, _ = extract_facts_from_chunk_mock(chunk, page_number=6, doc_filename="AR24.pdf")
+    vol_fy21 = next(f for f in facts if "express parcel" in f["metric"].lower() and f["period"] == "FY 2021")
+    assert "289" in str(vol_fy21["value"])
+    assert vol_fy21["normalized_value"] == 289.0
+    assert vol_fy21["binding_method"] == "series_alignment"
+
+def test_period_mismatch_prevents_corroboration():
+    fact_a = {
+        "id": 1, "document_id": "d1", "page": 1, "entity": "Delhivery Limited",
+        "metric": "EBITDA Margin", "value": "-2.75%", "unit": "%", "period": "FY 2021",
+        "normalized_value": -2.75, "normalized_unit": "%", "value_type": "PERCENT", "is_numeric": True
+    }
+    fact_b = {
+        "id": 2, "document_id": "d2", "page": 1, "entity": "Delhivery Limited",
+        "metric": "EBITDA Margin", "value": "1.6%", "unit": "%", "period": "FY 2024",
+        "normalized_value": 1.6, "normalized_unit": "%", "value_type": "PERCENT", "is_numeric": True
+    }
+    
+    res = judge_relationship_mock(fact_a, fact_b)
+    assert res["relationship"] == "TEMPORAL_COMPARISON"
+    assert res["taxonomy_category"] == "TEMPORAL_COMPARISON"
+    assert res["relationship"] != "RECONCILED"
+
+def test_generic_seller_table_extraction():
+    line = "CA Swift Investments 9,324,309 Equity Shares aggregating to ₹4,540 million"
+    facts, _ = extract_facts_from_chunk_mock(line, page_number=7, doc_filename="Prospectus.pdf")
+    assert len(facts) >= 2
+    seller_fact = next(f for f in facts if f["entity"] == "CA Swift Investments")
+    assert seller_fact["metric"] in ("Offer for Sale Amount", "Shares Offered for Sale")
+    assert seller_fact["binding_method"] == "table_cell"
+

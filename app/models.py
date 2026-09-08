@@ -54,9 +54,12 @@ class FactItem(BaseModel):
     metric_source_span: Optional[str] = None
     temporal_source_span: Optional[str] = None
     extraction_method: str = "llm"  # "llm", "table", "fallback"
+    binding_method: str = "sentence_direct"  # "sentence_direct", "table_cell", "series_alignment", "inferred_context"
+    pipeline_version: int = 4
     validation_status: str = "valid" # "valid" or "rejected"
     validation_notes: Optional[str] = None
     subject: Optional[str] = None
+    source_document: Optional[str] = None
 
 class RejectedExtractionItem(BaseModel):
     id: Optional[int] = None
@@ -72,14 +75,15 @@ class RelationshipItem(BaseModel):
     id: Optional[int] = None
     fact_id_a: int
     fact_id_b: int
-    relationship_type: str  # CORROBORATES, CONTRADICTS, LIKELY_CONTRADICTION, CONTEXTUAL_DIFFERENCE, RECONCILED_UNIT, RECONCILED_ROUNDING, RECONCILED_SCOPE, UNCERTAIN, UNRELATED
+    relationship_type: str  # CORROBORATES, CONTRADICTS, LIKELY_CONTRADICTION, TEMPORAL_COMPARISON, RECONCILED, UNCERTAIN, UNRELATED
     taxonomy_category: str = "UNCERTAIN"
     reasoning: str
     confidence: float
     comparison_delta: float = 0.0
     can_compute_delta: bool = False
-    reconciliation_type: str = "NONE" # UNIT_CONVERSION, ROUNDING, PERIOD_DIFFERENCE, SCOPE_DIFFERENCE, AUDIT_RESTATEMENT, NONE
+    reconciliation_type: str = "NONE" # UNIT_CONVERSION, ROUNDING, PERIOD_DIFFERENCE, SCOPE_DIFFERENCE, HISTORICAL_TREND, NONE
     match_checklist: List[str] = []
+    pipeline_version: int = 4
     fact_a: Optional[FactItem] = None
     fact_b: Optional[FactItem] = None
 
@@ -91,6 +95,7 @@ class AnalysisResponse(BaseModel):
     likely_contradictions_count: int
     contextual_differences_count: int
     reconciled_count: int
+    temporal_comparisons_count: int = 0
     unrelated_count: int
     uncertain_count: int
     relationships: List[RelationshipItem]
@@ -105,6 +110,7 @@ class AssignmentCasesResponse(BaseModel):
     corroborated_case: Optional[RelationshipItem] = None
     likely_contradiction_case: Optional[RelationshipItem] = None
     reconciled_case: Optional[RelationshipItem] = None
+    temporal_case: Optional[RelationshipItem] = None
     extraction_failure_case: Optional[RejectedExtractionItem] = None
 
 class ExtractionResponse(BaseModel):

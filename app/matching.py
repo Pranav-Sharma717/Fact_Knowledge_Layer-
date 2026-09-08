@@ -6,7 +6,9 @@ from typing import List, Dict, Any, Tuple
 from dotenv import load_dotenv
 
 from app.validation import UNIT_KEYWORDS, GENERIC_METRICS
-from app.number_classifier import ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT
+from app.number_classifier import (
+    ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT, canonicalize_metric
+)
 
 load_dotenv()
 
@@ -22,8 +24,11 @@ TAXONOMY_CONTEXTUAL_DIFFERENCE = "CONTEXTUAL_DIFFERENCE"
 TAXONOMY_RECONCILED_UNIT = "RECONCILED_UNIT"
 TAXONOMY_RECONCILED_ROUNDING = "RECONCILED_ROUNDING"
 TAXONOMY_RECONCILED_SCOPE = "RECONCILED_SCOPE"
+TAXONOMY_TEMPORAL_COMPARISON = "TEMPORAL_COMPARISON"
 TAXONOMY_UNCERTAIN = "UNCERTAIN"
 TAXONOMY_UNRELATED = "UNRELATED"
+
+MIN_RELATIONSHIP_CONFIDENCE = 0.70
 
 def can_compute_delta(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> bool:
     """
@@ -50,7 +55,7 @@ def can_compute_delta(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> bool:
 
 def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> Tuple[float, List[str], List[str]]:
     """
-    Evaluates hard gates for candidate comparability.
+    Evaluates hard gates for candidate comparability using strict generic metric canonicalization.
     Returns (score, passed_gates, failed_gates).
     If hard gates fail, score = 0.0 and pair is UNRELATED.
     """
@@ -83,23 +88,22 @@ def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]
         failed.append("✗ Generic or Invalid Metric Name")
         return 0.0, passed, failed
 
-    # Hard Gate 3: Value Type Compatibility (Task 9)
+    # Hard Gate 3: Value Type Compatibility
     if type_a != type_b and not (type_a in {ROLE_COUNT, ROLE_SHARE_COUNT} and type_b in {ROLE_COUNT, ROLE_SHARE_COUNT}):
         failed.append(f"✗ Incompatible Value Types ({type_a} vs {type_b})")
         return 0.0, passed, failed
     else:
         passed.append(f"✓ Compatible Value Type ({type_a})")
 
-    # Hard Gate 4: Metric Token Overlap
-    stopwords = {"the", "and", "of", "in", "for", "to", "a", "from", "on", "rate", "total", "states", "shows", "claim", "limited"}
-    words_a = set(re.findall(r'\w+', metric_a)) - stopwords
-    words_b = set(re.findall(r'\w+', metric_b)) - stopwords
+    # Hard Gate 4: Generic Canonical Metric Identity Match (User Review Fix 1)
+    canon_a = canonicalize_metric(metric_a)
+    canon_b = canonicalize_metric(metric_b)
 
-    if not words_a or not words_b or not words_a.intersection(words_b):
-        failed.append(f"✗ Metric Mismatch ('{metric_a}' vs '{metric_b}')")
+    if canon_a != canon_b:
+        failed.append(f"✗ Metric Canonical Mismatch ('{canon_a}' vs '{canon_b}')")
         return 0.0, passed, failed
     else:
-        passed.append(f"✓ Metric Match ('{metric_a.title()}')")
+        passed.append(f"✓ Metric Canonical Match ('{canon_a}')")
 
     # Hard Gate 5: Unit Compatibility
     if unit_a and unit_b and unit_a != unit_b:
@@ -198,7 +202,7 @@ Respond STRICTLY with valid JSON format:
 """
 
 def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> Dict[str, Any]:
-    """Fallback relationship judge using strict deterministic comparison rules (Task 10)."""
+    """Fallback relationship judge using strict deterministic comparison rules."""
     comp_score, passed_gates, failed_gates = calculate_comparability_score(fact_a, fact_b)
     if comp_score < 0.50:
         return {
@@ -225,76 +229,75 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
         avg_val = (abs(val_a) + abs(val_b)) / 2.0 if (abs(val_a) + abs(val_b)) > 0 else 1.0
         pct_delta = round((delta / avg_val) * 100.0, 2)
         
-        # 1. Exact or near-exact match (< 0.1% delta)
+        # Period Compatibility Check (User Review Fix 2 & 4)
+        is_same_period = (period_a and period_b and period_a == period_b)
+        is_period_diff = (period_a and period_b and period_a != period_b)
+
+        # 1. Same metric across different periods -> TEMPORAL_COMPARISON (User Review Fix 4)
+        if is_period_diff:
+            return {
+                "relationship": TAXONOMY_TEMPORAL_COMPARISON,
+                "taxonomy_category": TAXONOMY_TEMPORAL_COMPARISON,
+                "reasoning": f"Historical trend comparison for {fact_a.get('metric')} across periods ({fact_a.get('period')} vs {fact_b.get('period')}): {fact_a.get('value')} vs {fact_b.get('value')}.",
+                "confidence_delta": 0.85,
+                "comparison_delta": pct_delta,
+                "can_compute_delta": True,
+                "reconciliation_type": "HISTORICAL_TREND",
+                "match_checklist": passed_gates + ["ℹ Historical Trend Across Periods"]
+            }
+
+        # 2. Same period: Exact or near-exact match (< 0.1% delta) -> CORROBORATES or RECONCILED_UNIT
         if pct_delta < 0.1:
             raw_u_a = (fact_a.get("unit") or "").lower()
             raw_u_b = (fact_b.get("unit") or "").lower()
-            # Unit conversion check: e.g. million vs crore or lakh
             is_scale_diff = (("crore" in raw_u_a) != ("crore" in raw_u_b)) or (("million" in raw_u_a) != ("million" in raw_u_b)) or (("lakh" in raw_u_a) != ("lakh" in raw_u_b))
             if is_scale_diff:
                 return {
                     "relationship": "RECONCILED",
                     "taxonomy_category": TAXONOMY_RECONCILED_UNIT,
                     "reasoning": f"Values align ({fact_a.get('value')} vs {fact_b.get('value')}) when normalized via unit conversion ({val_a:g} {unit_a}).",
-                    "confidence_delta": 0.15,
+                    "confidence_delta": 0.90,
                     "comparison_delta": pct_delta,
                     "can_compute_delta": True,
                     "reconciliation_type": "UNIT_CONVERSION",
                     "match_checklist": passed_gates + ["✓ Values Match via Unit Conversion"]
                 }
-            if period_a and period_b and period_a != period_b:
+            
+            if is_same_period or (not period_a and not period_b):
                 return {
-                    "relationship": "RECONCILED",
-                    "taxonomy_category": TAXONOMY_CONTEXTUAL_DIFFERENCE,
-                    "reasoning": f"Identical value ({val_a:g}) reported across different time periods ({fact_a.get('period')} vs {fact_b.get('period')}).",
-                    "confidence_delta": 0.10,
+                    "relationship": TAXONOMY_CORROBORATES,
+                    "taxonomy_category": TAXONOMY_CORROBORATES,
+                    "reasoning": f"Both documents corroborate the exact same metric value ({val_a:g} {unit_a}) for {fact_a.get('period') or 'same context'}.",
+                    "confidence_delta": 0.95,
                     "comparison_delta": pct_delta,
                     "can_compute_delta": True,
-                    "reconciliation_type": "PERIOD_DIFFERENCE",
-                    "match_checklist": passed_gates + ["✓ Identical Value Across Periods"]
+                    "reconciliation_type": "NONE",
+                    "match_checklist": passed_gates + ["✓ Values & Periods Match Exactly"]
                 }
-            return {
-                "relationship": TAXONOMY_CORROBORATES,
-                "taxonomy_category": TAXONOMY_CORROBORATES,
-                "reasoning": f"Both documents corroborate the exact same metric value ({val_a:g} {unit_a}).",
-                "confidence_delta": 0.20,
-                "comparison_delta": pct_delta,
-                "can_compute_delta": True,
-                "reconciliation_type": "NONE",
-                "match_checklist": passed_gates + ["✓ Values & Periods Match Exactly"]
-            }
             
-        # 2. Small presentation / rounding difference (< 1.5% delta, e.g. 289.20M vs 289M) (Task 16)
+        # 3. Small presentation / rounding difference (< 1.5% delta, e.g. 289.20M vs 289M)
         elif pct_delta < 1.5:
-            if period_a and period_b and period_a != period_b:
-                tax_cat = TAXONOMY_CONTEXTUAL_DIFFERENCE
-                rec_type = "PERIOD_DIFFERENCE"
-                expl = f"Value discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) is explained by differing reporting periods ({fact_a.get('period')} vs {fact_b.get('period')})."
-            else:
-                tax_cat = TAXONOMY_RECONCILED_ROUNDING
-                rec_type = "ROUNDING"
-                expl = f"Values ({val_a:g} vs {val_b:g}) match within minor presentation/rounding margin ({pct_delta}% delta)."
-
-            return {
-                "relationship": TAXONOMY_CORROBORATES if tax_cat == TAXONOMY_RECONCILED_ROUNDING else "RECONCILED",
-                "taxonomy_category": tax_cat,
-                "reasoning": expl,
-                "confidence_delta": 0.15 if tax_cat == TAXONOMY_RECONCILED_ROUNDING else 0.05,
-                "comparison_delta": pct_delta,
-                "can_compute_delta": True,
-                "reconciliation_type": rec_type,
-                "match_checklist": passed_gates + [f"✓ Rounding Match ({pct_delta}% delta)"]
-            }
+            if is_same_period or (not period_a and not period_b):
+                return {
+                    "relationship": TAXONOMY_CORROBORATES,
+                    "taxonomy_category": TAXONOMY_RECONCILED_ROUNDING,
+                    "reasoning": f"Values ({val_a:g} vs {val_b:g}) match within minor presentation/rounding margin ({pct_delta}% delta) for {fact_a.get('period') or 'same context'}.",
+                    "confidence_delta": 0.90,
+                    "comparison_delta": pct_delta,
+                    "can_compute_delta": True,
+                    "reconciliation_type": "ROUNDING",
+                    "match_checklist": passed_gates + [f"✓ Rounding Match ({pct_delta}% delta)"]
+                }
             
-        # 3. Differing values
+        # 4. Differing values in same period -> CONTRADICTS / LIKELY_CONTRADICTION
         else:
-            if period_a and period_b and period_a == period_b:
+            if is_same_period:
                 if pct_delta <= 5.0:
                     return {
                         "relationship": TAXONOMY_LIKELY_CONTRADICTION,
                         "taxonomy_category": TAXONOMY_LIKELY_CONTRADICTION,
                         "reasoning": f"Minor unexplained discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) for the same reporting period ({fact_a.get('period')}).",
-                        "confidence_delta": -0.15,
+                        "confidence_delta": 0.80,
                         "comparison_delta": pct_delta,
                         "can_compute_delta": True,
                         "reconciliation_type": "NONE",
@@ -305,28 +308,17 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
                         "relationship": TAXONOMY_CONTRADICTS,
                         "taxonomy_category": TAXONOMY_CONTRADICTS,
                         "reasoning": f"Significant direct contradiction ({val_a:g} vs {val_b:g}, {pct_delta}% delta) for the same period ({fact_a.get('period')}) without contextual explanation.",
-                        "confidence_delta": -0.30,
+                        "confidence_delta": 0.85,
                         "comparison_delta": pct_delta,
                         "can_compute_delta": True,
                         "reconciliation_type": "NONE",
                         "match_checklist": passed_gates + ["✗ Direct Unexplained Contradiction"]
                     }
-            else:
-                return {
-                    "relationship": "RECONCILED",
-                    "taxonomy_category": TAXONOMY_CONTEXTUAL_DIFFERENCE,
-                    "reasoning": f"Value difference ({val_a:g} vs {val_b:g}) represents a contextual difference (reporting periods: '{fact_a.get('period') or 'Unspecified'}' vs '{fact_b.get('period') or 'Unspecified'}').",
-                    "confidence_delta": 0.0,
-                    "comparison_delta": pct_delta,
-                    "can_compute_delta": True,
-                    "reconciliation_type": "PERIOD_DIFFERENCE",
-                    "match_checklist": passed_gates + ["ℹ Contextual / Period Difference"]
-                }
-                
+
     return {
         "relationship": TAXONOMY_UNCERTAIN,
         "taxonomy_category": TAXONOMY_UNCERTAIN,
-        "reasoning": "Non-numeric or ambiguous comparison.",
+        "reasoning": "Non-numeric, ambiguous, or missing period context for comparison.",
         "confidence_delta": 0.0,
         "comparison_delta": 0.0,
         "can_compute_delta": False,

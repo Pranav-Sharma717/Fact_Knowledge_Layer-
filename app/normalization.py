@@ -28,9 +28,23 @@ CURRENCY_MAP = {
 }
 
 def parse_raw_numeric(val_str: str) -> Optional[float]:
-    """Extracts first float/int value from raw value string."""
+    """
+    Extracts first float/int value from raw value string.
+    Supports parenthesized negative financial numbers like (9.11%), (4,516.08), or ₹(100).
+    """
     if not val_str:
         return None
+    
+    # 1. Check parenthesized negative financial format: (123.45) or ₹(123) or (9.11%)
+    paren_match = re.search(r'\(\s*(?:₹|\$|inr|usd|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*\%?\s*\)', val_str, re.IGNORECASE)
+    if paren_match:
+        clean_num = paren_match.group(1).replace(',', '')
+        try:
+            return -abs(float(clean_num))
+        except ValueError:
+            pass
+
+    # 2. Standard float matching with optional leading - or +
     match = re.search(r'[-+]?\d+(?:,\d+)*(?:\.\d+)?', val_str)
     if match:
         clean_num = match.group(0).replace(',', '')
@@ -43,7 +57,7 @@ def parse_raw_numeric(val_str: str) -> Optional[float]:
 def normalize_fact(fact: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalizes numeric values and units generically according to number typing rules.
-    Prevents false currency scaling on share counts or volume metrics.
+    Prevents false currency scaling on share counts or volume metrics and handles negative signs.
     """
     raw_val = str(fact.get("value", "")).strip()
     raw_unit = str(fact.get("unit", "") or "").strip()

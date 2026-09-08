@@ -324,6 +324,7 @@
             <div class="summary-item">Corroborations: <span class="val" id="sumCorr">0</span></div>
             <div class="summary-item">Contradictions: <span class="val" id="sumContra">0</span></div>
             <div class="summary-item">Reconciled: <span class="val" id="sumReconc">0</span></div>
+            <div class="summary-item">Temporal Comparisons: <span class="val" id="sumTemporal">0</span></div>
         </div>
 
         <div style="display: flex; gap: 10px;">
@@ -435,16 +436,18 @@
                 allRelationships = await fetchJson('/relationships');
                 renderRelationships(allRelationships);
 
-                let corrCount = 0, contraCount = 0, reconcCount = 0;
+                let corrCount = 0, contraCount = 0, reconcCount = 0, temporalCount = 0;
                 allRelationships.forEach(r => {
                     const typeUpper = (r.relationship_type || '').toUpperCase();
                     if (typeUpper === 'CORROBORATES') corrCount++;
                     else if (typeUpper.includes('CONTRADICT')) contraCount++;
                     else if (typeUpper.includes('RECONCILED')) reconcCount++;
+                    else if (typeUpper === 'TEMPORAL_COMPARISON') temporalCount++;
                 });
                 document.getElementById('sumCorr').innerText = corrCount;
                 document.getElementById('sumContra').innerText = contraCount;
                 document.getElementById('sumReconc').innerText = reconcCount;
+                document.getElementById('sumTemporal').innerText = temporalCount;
 
                 const rejectedGrouped = await fetchJson('/rejected-extractions');
                 document.getElementById('sumRejected').innerText = rejectedGrouped.total_rejected || 0;
@@ -508,7 +511,7 @@
         async function runAnalysis() {
             try {
                 const data = await fetchJson('/analyze', { method: 'POST' });
-                alert(`Analysis Complete!\nEvaluated ${data.candidate_pairs_evaluated} candidate pairs.\nRelationships found: ${data.relationships_found_count}\n- Corroborations: ${data.corroborations_count}\n- Reconciled Context: ${data.reconciled_count}\n- Contradictions: ${data.contradictions_count + data.likely_contradictions_count}\n- Unrelated: ${data.unrelated_count}`);
+                alert(`Analysis Complete!\nEvaluated ${data.candidate_pairs_evaluated} candidate pairs.\nRelationships found: ${data.relationships_found_count}\n- Corroborations: ${data.corroborations_count}\n- Reconciled Context: ${data.reconciled_count}\n- Temporal Comparisons: ${data.temporal_comparisons_count || 0}\n- Contradictions: ${data.contradictions_count + data.likely_contradictions_count}\n- Unrelated: ${data.unrelated_count}`);
                 refreshData();
             } catch (e) {
                 alert("Analysis failed: " + e.message);
@@ -548,6 +551,11 @@
                 const normStr = formatHumanNorm(f);
                 const docName = f.source_document || (f.document_id ? f.document_id.substring(0, 8) : 'Unknown Doc');
 
+                let unitDisplay = f.unit || '';
+                if (f.value && (f.value.includes('₹') || f.value.includes('$')) && unitDisplay === 'INR') {
+                    unitDisplay = '';
+                }
+
                 return `
                     <div class="fact-card">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
@@ -563,13 +571,14 @@
                         
                         <div class="fact-val-box">
                             <span class="fact-val">${f.value}</span>
-                            <span class="fact-unit">${f.unit || ''}</span>
+                            <span class="fact-unit">${unitDisplay}</span>
                         </div>
 
                         <details style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 6px;">
                             <summary style="cursor: pointer; color: var(--warning); font-weight: 500;">Technical Details & Normalization</summary>
                             <div style="padding-top: 4px;">
                                 ${normStr ? `<div>${normStr}</div>` : ''}
+                                <div>Binding Method: <strong>${f.binding_method || 'sentence_direct'}</strong></div>
                                 <div>Value Binding Conf: ${((f.value_binding_confidence || 0.9) * 100).toFixed(0)}%</div>
                                 <div>Semantic Grounding: ${((f.grounding_confidence || 0.9) * 100).toFixed(0)}%</div>
                             </div>
