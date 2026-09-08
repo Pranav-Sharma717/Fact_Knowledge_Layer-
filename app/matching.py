@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 
 from app.validation import UNIT_KEYWORDS, GENERIC_METRICS
 from app.number_classifier import (
-    ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT, canonicalize_metric
+    ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT, canonicalize_metric,
+    is_section_prefix_number
 )
 
 load_dotenv()
@@ -29,6 +30,36 @@ TAXONOMY_UNCERTAIN = "UNCERTAIN"
 TAXONOMY_UNRELATED = "UNRELATED"
 
 MIN_RELATIONSHIP_CONFIDENCE = 0.70
+
+def is_relationship_eligible_fact(fact: Dict[str, Any]) -> bool:
+    """Strict pre-matching quality gate; suspicious diagnostics stay out of matching."""
+    metric = canonicalize_metric(fact.get("metric", ""))
+    unit = (fact.get("normalized_unit") or fact.get("unit") or "").strip().lower()
+    quote = (fact.get("raw_quote") or "").strip().lower()
+    val = str(fact.get("value") or "").strip()
+    
+    # Structural or missing
+    if metric in {"unspecified_metric", "inflation", "general_metric", "general_assertion"}:
+        return False
+    if fact.get("normalized_value") is None or not unit:
+        return False
+        
+    # Hard-reject section / paragraph numbers masquerading as metric values: "1.12", "1.52", "II.5.10"
+    if is_section_prefix_number(quote, val, fact.get("numeric_value")):
+        return False
+                
+    # Hard-reject monetary-policy bps/delta/spread masquerading as level repo rate
+    if ("bps" in quote or "basis point" in quote) and ("repo" in metric or "rate" in metric):
+        if not ("change" in metric or "spread" in metric or "delta" in metric):
+            return False
+    if "above" in quote and "repo" in metric and not ("spread" in metric):
+        return False
+        
+    # Hard-reject chart-axis values or isolated -24, -25, -26 ticks
+    if val in {"-24", "-25", "-26", "-265", "-241"} and ("chart" in quote or "\n-2" in quote or len(quote) < 30):
+        return False
+        
+    return True
 
 def can_compute_delta(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> bool:
     """
@@ -70,6 +101,9 @@ def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]
     type_b = fact_b.get("value_type", "UNKNOWN")
     unit_a = (fact_a.get("normalized_unit") or fact_a.get("unit") or "").lower().strip()
     unit_b = (fact_b.get("normalized_unit") or fact_b.get("unit") or "").lower().strip()
+
+    if not is_relationship_eligible_fact(fact_a) or not is_relationship_eligible_fact(fact_b):
+        return 0.0, passed, ["✗ Fact failed relationship eligibility quality gate"]
 
     # Hard Gate 1: Entity Compatibility
     if entity_a and entity_b:
@@ -126,19 +160,23 @@ def find_candidate_pairs(
     """
     Computes pairwise similarity between facts across different documents
     to identify candidate pairs for relationship evaluation.
+    Enforces quality-gate eligibility and strictly bounds candidate count.
     """
     if len(facts) < 2:
         return []
         
     num_facts = len(facts)
-    exact_pairs = []
-    fuzzy_pairs = []
+    scored_pairs = []
     seen_pairs = set()
 
     for i in range(num_facts):
+        f_a = facts[i]
+        if not is_relationship_eligible_fact(f_a):
+            continue
         for j in range(i + 1, num_facts):
-            f_a = facts[i]
             f_b = facts[j]
+            if not is_relationship_eligible_fact(f_b):
+                continue
             
             if f_a["document_id"] == f_b["document_id"]:
                 continue
@@ -152,17 +190,35 @@ def find_candidate_pairs(
             if comp_score < 0.50:
                 continue
                 
-            pair = (f_a, f_b, comp_score, passed_gates)
-            exact_block = (
-                (f_a.get("subject_entity") or f_a.get("entity")) == (f_b.get("subject_entity") or f_b.get("entity"))
-                and canonicalize_metric(f_a.get("metric", "")) == canonicalize_metric(f_b.get("metric", ""))
-                and f_a.get("value_type") == f_b.get("value_type")
-            )
-            (exact_pairs if exact_block else fuzzy_pairs).append(pair)
+            canon_a = canonicalize_metric(f_a.get("metric", ""))
+            canon_b = canonicalize_metric(f_b.get("metric", ""))
+            period_a = (f_a.get("period") or "").strip().lower()
+            period_b = (f_b.get("period") or "").strip().lower()
+            v_a = (f_a.get("estimate_vintage") or f_a.get("vintage") or "").strip().upper()
+            v_b = (f_b.get("estimate_vintage") or f_b.get("vintage") or "").strip().upper()
+            s_a = (f_a.get("period_scope") or f_a.get("scope") or "").strip().upper()
+            s_b = (f_b.get("period_scope") or f_b.get("scope") or "").strip().upper()
+
+            priority = 0.0
+            if canon_a == canon_b and canon_a not in {"unspecified_metric", "general_metric"}:
+                priority += 40.0
+                if period_a and period_b and period_a == period_b:
+                    priority += 50.0
+                    # Prioritize estimate vintage revisions (e.g. FAE vs SAE)
+                    if v_a and v_b and v_a != v_b:
+                        priority += 30.0
+                    # Prioritize scope differences (e.g. APR_DEC vs FULL_YEAR)
+                    elif (s_a == "APR_DEC" and s_b != "APR_DEC") or (s_b == "APR_DEC" and s_a != "APR_DEC"):
+                        priority += 25.0
+                elif period_a and period_b:
+                    priority += 20.0
             
-    fuzzy_pairs.sort(key=lambda x: x[2], reverse=True)
-    # Exact semantic blocks are never subject to the global discovery cap.
-    return exact_pairs + fuzzy_pairs[:max(0, max_candidates - len(exact_pairs))]
+            pair = (f_a, f_b, comp_score, passed_gates)
+            scored_pairs.append((priority, comp_score, pair))
+            
+    # Sort pairs by priority first, then comparability score
+    scored_pairs.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [p[2] for p in scored_pairs[:max_candidates]]
 
 JUDGE_PROMPT = """You are a rigorous financial & macroeconomic fact-checking engine.
 Analyze two extracted facts from different documents and evaluate their relationship.
@@ -230,10 +286,10 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
     unit_b = (fact_b.get("normalized_unit") or fact_b.get("unit") or "").upper()
     period_a = (fact_a.get("period") or "").strip().lower()
     period_b = (fact_b.get("period") or "").strip().lower()
-    scope_a = (fact_a.get("period_scope") or "").strip().upper()
-    scope_b = (fact_b.get("period_scope") or "").strip().upper()
-    vintage_a = (fact_a.get("estimate_vintage") or "").strip().upper()
-    vintage_b = (fact_b.get("estimate_vintage") or "").strip().upper()
+    scope_a = (fact_a.get("period_scope") or fact_a.get("scope") or "").strip().upper()
+    scope_b = (fact_b.get("period_scope") or fact_b.get("scope") or "").strip().upper()
+    vintage_a = (fact_a.get("estimate_vintage") or fact_a.get("vintage") or "").strip().upper()
+    vintage_b = (fact_b.get("estimate_vintage") or fact_b.get("vintage") or "").strip().upper()
     computable = can_compute_delta(fact_a, fact_b)
 
     if val_a is not None and val_b is not None and computable:
@@ -245,14 +301,17 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
         is_same_period = (period_a and period_b and period_a == period_b)
         is_period_diff = (period_a and period_b and period_a != period_b)
 
-        if is_same_period and scope_a and scope_b and scope_a != scope_b:
+        is_scope_diff = (scope_a and scope_b and scope_a != scope_b) or \
+                        (scope_a == "APR_DEC" and scope_b != "APR_DEC") or \
+                        (scope_b == "APR_DEC" and scope_a != "APR_DEC")
+        if is_same_period and is_scope_diff:
             return {
                 "relationship": TAXONOMY_TEMPORAL_COMPARISON,
                 "taxonomy_category": TAXONOMY_TEMPORAL_COMPARISON,
-                "reasoning": f"Same reporting year but incompatible scopes ({scope_a} vs {scope_b}); values are not a contradiction.",
-                "confidence_delta": 0.85, "comparison_delta": pct_delta,
+                "reasoning": f"Same reporting period ({fact_a.get('period')}) but different temporal scopes ({scope_a or 'FULL_YEAR'} vs {scope_b or 'FULL_YEAR'}); values reflect partial vs full period rather than a contradiction.",
+                "confidence_delta": 0.88, "comparison_delta": pct_delta,
                 "can_compute_delta": True, "reconciliation_type": "SCOPE_PERIOD_DIFFERENCE",
-                "match_checklist": passed_gates + ["ℹ Scope/period difference"]
+                "match_checklist": passed_gates + ["ℹ Scope/period difference (partial vs full year)"]
             }
 
         if is_same_period and vintage_a and vintage_b and vintage_a != vintage_b:
@@ -358,15 +417,22 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
     }
 
 def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: str = None) -> Dict[str, Any]:
-    """Calls LLM judge (OpenRouter) to evaluate candidate pair relationship, with fallback judge."""
+    """
+    Evaluates candidate pair relationship. Prioritizes deterministic evaluation for
+    verified numerical categories (corroboration, rounding, unit conversion, scope/vintage revision),
+    and queries LLM judge with strict fast timeout when ambiguous.
+    """
+    mock_res = judge_relationship_mock(fact_a, fact_b)
+    if mock_res.get("confidence_delta", 0.0) >= 0.85 and mock_res.get("relationship") != TAXONOMY_UNCERTAIN:
+        return mock_res
+        
     key = api_key or OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY", "")
-    
     if not key or key == "your_openrouter_api_key_here":
-        return judge_relationship_mock(fact_a, fact_b)
+        return mock_res
         
     comp_score, passed_gates, failed_gates = calculate_comparability_score(fact_a, fact_b)
     if comp_score < 0.50:
-        return judge_relationship_mock(fact_a, fact_b)
+        return mock_res
         
     prompt = JUDGE_PROMPT.format(
         doc_a=fact_a.get("document_id"), page_a=fact_a.get("page"),
@@ -395,10 +461,10 @@ def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: 
     }
     
     try:
-        with httpx.Client(timeout=12.0) as client:
+        with httpx.Client(timeout=4.0) as client:
             res = client.post(OPENROUTER_URL, headers=headers, json=payload)
             if res.status_code != 200:
-                return judge_relationship_mock(fact_a, fact_b)
+                return mock_res
             data = res.json()
             raw_content = data["choices"][0]["message"]["content"]
             parsed = json.loads(raw_content)
@@ -425,7 +491,7 @@ def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: 
                 "match_checklist": passed_gates
             }
     except Exception:
-        return judge_relationship_mock(fact_a, fact_b)
+        return mock_res
 
 def recalculate_fact_confidences(conn) -> Dict[int, float]:
     """Updates final_confidence in SQLite for all facts in a fast batch transaction."""

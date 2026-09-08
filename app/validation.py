@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Tuple
 
 from app.number_classifier import (
     detect_navigation_reference, classify_number_role, is_metric_value_role,
-    ROLE_PAGE_REFERENCE, ROLE_YEAR, ROLE_DATE_COMPONENT, ROLE_NOTE_REFERENCE, ROLE_LIST_INDEX
+    is_section_prefix_number, ROLE_PAGE_REFERENCE, ROLE_YEAR, ROLE_DATE_COMPONENT, ROLE_NOTE_REFERENCE, ROLE_LIST_INDEX
 )
 
 HEADER_PATTERNS = [
@@ -104,6 +104,48 @@ def validate_fact_candidate(fact: Dict[str, Any]) -> Dict[str, Any]:
                 "rejection_reason": f"Number '{value}' represents a {role} rather than a metric value.",
                 "warnings": [f"Number classified as {role}"]
             }
+
+        # 3.1 Hard-reject section/paragraph numbers as values
+        clean_quote = quote.strip()
+        if is_section_prefix_number(clean_quote, str(value).strip(), num_val):
+            return {
+                "valid": False,
+                "failure_type": "SECTION_IDENTIFIER_AS_VALUE",
+                "rejection_reason": f"Number '{value}' is a section/paragraph identifier prefix, not a metric value.",
+                "warnings": ["Section prefix number rejected"]
+            }
+
+        # 3.2 Hard-reject basis point changes and spreads masquerading as base rate level
+        metric_lower = metric.lower()
+        if ("bps" in quote.lower() or role in {"BASIS_POINT_CHANGE", "SPREAD"}) and ("repo" in metric_lower or "interest" in metric_lower or "rate" in metric_lower):
+            if not ("change" in metric_lower or "spread" in metric_lower or "delta" in metric_lower):
+                return {
+                    "valid": False,
+                    "failure_type": "DELTA_SPREAD_AS_LEVEL",
+                    "rejection_reason": f"Quantity '{value}' represents a rate change or spread, but fact asserts policy rate level ('{metric}').",
+                    "warnings": ["Rate change/spread mismatch with level metric"]
+                }
+
+        # 3.3 Unit Dimension Enforcement: Known metrics MUST possess corresponding units
+        unit_lower = (unit or "").lower().strip()
+        if any(k in metric_lower for k in ["inflation", "gdp", "growth rate", "repo rate"]):
+            if not ("change" in metric_lower or "spread" in metric_lower or "delta" in metric_lower):
+                if unit_lower != "%" and "percent" not in unit_lower and "bps" not in unit_lower and "%" not in str(value):
+                    return {
+                        "valid": False,
+                        "failure_type": "MISSING_PERCENT_UNIT",
+                        "rejection_reason": f"Metric '{metric}' is a percentage rate, but unit is '{unit or 'None'}' (must have % or bps).",
+                        "warnings": ["Rate metric missing percentage unit"]
+                    }
+
+        if any(k in metric_lower for k in ["borrowings", "net debt", "revenue", "income", "cash flow", "offer size", "share capital", "litigation"]):
+            if not any(c in unit_lower or c in str(value).lower() for c in ["inr", "usd", "₹", "$", "rs", "crore", "million", "billion", "lakh"]):
+                return {
+                    "valid": False,
+                    "failure_type": "MISSING_CURRENCY_UNIT",
+                    "rejection_reason": f"Monetary metric '{metric}' requires currency or monetary scale unit, but got '{unit or 'None'}'.",
+                    "warnings": ["Monetary metric missing currency unit"]
+                }
 
     # 4. Value Binding Confidence Check (Task 1)
     if num_val is not None and binding_conf < 0.75:

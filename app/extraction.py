@@ -9,7 +9,8 @@ from app.normalization import normalize_fact, parse_raw_numeric
 from app.validation import validate_fact_candidate, is_header_or_unit_label, UNIT_KEYWORDS, GENERIC_METRICS
 from app.number_classifier import (
     classify_number_role, is_metric_value_role, detect_navigation_reference,
-    detect_index_base_metadata, ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT, ROLE_YEAR
+    detect_index_base_metadata, is_section_prefix_number,
+    ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT, ROLE_YEAR
 )
 
 load_dotenv()
@@ -65,9 +66,9 @@ KNOWN_METRIC_PATTERNS = [
     (r'headcount|employee\s+count|workforce', 'Workforce Size', ROLE_COUNT),
     (r'female\s+workers?|female\s+workforce', 'Female Workforce Growth', ROLE_PERCENT),
     (r'attrition\s+rate|employee\s+attrition', 'Employee Attrition Rate', ROLE_PERCENT),
-    (r'gdp\s+growth', 'GDP Growth Rate', ROLE_PERCENT),
-    (r'inflation\s+rate|cpi', 'Inflation Rate', ROLE_PERCENT),
-    (r'repo\s+rate', 'Repo Rate', ROLE_PERCENT),
+    (r'(?:real\s+)?(?:gross\s+domestic\s+product|\(?gdp\)?)(?:\s*\(gdp\))?(?:\d+)?\s+growth', 'GDP Growth Rate', ROLE_PERCENT),
+    (r'inflation\s+rate|cpi|headline\s+inflation', 'Inflation Rate', ROLE_PERCENT),
+    (r'(?:policy\s+)?repo\s+rate', 'Repo Rate', ROLE_PERCENT),
     (r'share\s+capital', 'Share Capital', ROLE_MONEY),
     (r'offer\s+of|equity\s+shares\s+aggregating|initial\s+public\s+offer', 'Offer Size / Equity Shares', ROLE_SHARE_COUNT),
     (r'total\s+income', 'Total Income', ROLE_MONEY),
@@ -113,9 +114,9 @@ def infer_source_organization(doc_filename: str) -> Optional[str]:
 
 def resolve_period_scope(text: str) -> Optional[str]:
     clean = (text or "").lower()
-    if re.search(r'april\s*[-–to ]+\s*december|apr(?:il)?\s*[-–]\s*dec', clean):
+    if re.search(r'april\s*.*?december|apr(?:il)?\s*.*?dec', clean, re.IGNORECASE):
         return "APR_DEC"
-    if "full year" in clean or "annual" in clean or re.search(r'fy\s*\d{2,4}', clean):
+    if "full year" in clean or "annual" in clean:
         return "FULL_YEAR"
     return None
 
@@ -225,11 +226,15 @@ def extract_series_alignment_candidates(chunk_text: str, doc_filename: str = "")
             metric_line = next((lines[k] for k in range(i + 1, min(len(lines), i + 4))
                                 if any(re.search(p, lines[k], re.I) for p, _, _ in KNOWN_METRIC_PATTERNS)), None)
         value_line = next((lines[k] for k in range(i + 1, min(len(lines), i + 4))
-                           if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)), None)
+                           if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)
+                           and not re.search(r'\b(?:19|20)\d{2}-\d{2,4}\b', lines[k])
+                           and len(re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', lines[k], re.I)) < 2), None)
         # MuPDF sometimes emits the period labels after the values in a chart.
         if not value_line:
             value_line = next((lines[k] for k in range(max(0, i - 3), i)
-                               if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)), None)
+                               if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)
+                               and not re.search(r'\b(?:19|20)\d{2}-\d{2,4}\b', lines[k])
+                               and len(re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', lines[k], re.I)) < 2), None)
         if not metric_line or not value_line:
             continue
         metric_match = next(((name, role) for pattern, name, role in KNOWN_METRIC_PATTERNS
@@ -295,7 +300,9 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
     clean_line = line.lower()
     for pattern, metric_name, expected_role in KNOWN_METRIC_PATTERNS:
         if re.search(pattern, clean_line):
-            numbers = re.findall(r'(\(\s*(?:₹|\$|INR|USD|Rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?\s*\%?\s*\)|(?:₹|\$|INR|USD|Rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:million|billion|crore|lakh|crores|lakhs|%|percent|shares|equity\s+shares|parcels|orders|employees))?)', line, re.IGNORECASE)
+            # Tokenize numeric values with explicit support for % / per cent / percent / bps
+            numbers = re.findall(r'(\(\s*(?:₹|\$|INR|USD|Rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?\s*(?:%|percent|per cent)?\s*\)|(?:₹|\$|INR|USD|Rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:million|billion|crore|lakh|crores|lakhs|%|percent|per cent|shares|equity\s+shares|parcels|orders|employees|bps|basis\s+points))?)', line, re.IGNORECASE)
+            seen_line_vals = set()
             for num_str in numbers:
                 if not num_str or not re.search(r'\d', num_str):
                     continue
@@ -308,17 +315,23 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                 )
                 if not is_metric_value_role(role):
                     continue
-                    
-                # Multi-value handle: if line has shares count AND money size
-                if "shares" in line.lower() and "aggregating" in line.lower() and role == ROLE_MONEY and expected_role == ROLE_SHARE_COUNT:
-                    candidate_metric = "Offer Size"
-                elif "shares" in num_str.lower() or role == ROLE_SHARE_COUNT:
-                    candidate_metric = "Offer Equity Shares"
-                else:
-                    candidate_metric = metric_name
 
-                unit_match = re.search(r'(million|billion|crore|lakh|crores|lakhs|%|percent|shares|equity\s+shares|parcels|orders|employees|INR|USD|₹|\$)', num_str, re.IGNORECASE)
-                unit_found = unit_match.group(1) if unit_match else None
+                # Hard-reject section prefixes: if line starts with section prefix like 1.12 or 1.52, do not extract it
+                if is_section_prefix_number(clean_line, num_str.strip(), parsed_num):
+                    continue
+
+                # Skip numbers attached directly to a letter or closing paren (e.g. (GDP)3, inflation14)
+                pos_in_line = line.find(num_str)
+                if pos_in_line > 0:
+                    char_before = line[pos_in_line - 1]
+                    if char_before in ")abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" and not num_str.startswith(("$", "₹", "INR", "USD", "Rs")):
+                        continue
+
+                # Check if number is part of a hyphenated year like 2024-25
+                if pos_in_line != -1:
+                    pre_char = line[max(0, pos_in_line-5):pos_in_line]
+                    if re.search(r'(?:19|20)\d{2}-?$', pre_char):
+                        continue
 
                 display_val = num_str.strip()
                 if parsed_num < 0 and not display_val.startswith("-") and not display_val.startswith("("):
@@ -326,13 +339,115 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                 elif "(" in display_val and ")" in display_val:
                     display_val = f"-{re.sub(r'[\(\)]', '', display_val).strip()}"
 
+                # Deduplicate exact display_val within the same line for the same metric pattern
+                val_key = (f"{parsed_num:g}", display_val)
+                if val_key in seen_line_vals:
+                    continue
+                seen_line_vals.add(val_key)
+
+                # Bind relational cues before the broad metric pattern.
+                if role == "BASIS_POINT_CHANGE":
+                    candidate_metric = "Policy Repo Rate Change"
+                    if not display_val.startswith("-"):
+                        display_val = f"-{display_val}"
+                    unit_found = "%" if "%" in display_val else "bps"
+                elif role == "SPREAD":
+                    candidate_metric = "Spread to Policy Repo Rate"
+                    unit_found = "%" if "%" in display_val else "bps"
+                else:
+                    candidate_metric = None
+                    
+                # Multi-value handle: if line has shares count AND money size
+                if candidate_metric:
+                    pass
+                elif "shares" in line.lower() and "aggregating" in line.lower() and role == ROLE_MONEY and expected_role == ROLE_SHARE_COUNT:
+                    candidate_metric = "Offer Size"
+                elif "shares" in num_str.lower() or role == ROLE_SHARE_COUNT:
+                    candidate_metric = "Offer Equity Shares"
+                elif "retail headline inflation" in clean_line:
+                    candidate_metric = "Retail Headline Inflation"
+                elif "headline inflation" in clean_line:
+                    candidate_metric = "Headline Inflation"
+                elif "core" in clean_line and "inflation" in clean_line:
+                    candidate_metric = "Core Inflation"
+                elif "food" in clean_line and "inflation" in clean_line:
+                    candidate_metric = "Food Inflation"
+                elif "real gross domestic product" in clean_line or "real gdp" in clean_line:
+                    candidate_metric = "Real GDP Growth"
+                else:
+                    candidate_metric = metric_name
+
+                # Local context for period and scope
+                pos = pos_in_line if pos_in_line != -1 else line.find(num_str)
+                before = line[max(0, pos-40):pos]
+                after = line[pos+len(num_str):min(len(line), pos+len(num_str)+50)]
+                local_window = f"{before} {num_str} {after}".lower()
+
+                unit_match = re.search(r'(million|billion|crore|lakh|crores|lakhs|%|percent|per cent|shares|equity\s+shares|parcels|orders|employees|INR|USD|₹|\$)', num_str, re.IGNORECASE)
+                unit_found = "%" if (unit_match and unit_match.group(1).lower() in {"%", "percent", "per cent"}) else (unit_match.group(1) if unit_match else None)
+                
+                # Check immediately following text for % or per cent or bps
+                after_lower = after.strip().lower()
+                if not unit_found and expected_role == ROLE_PERCENT:
+                    if after_lower.startswith("%") or after_lower.startswith("per cent") or after_lower.startswith("percent") or after_lower.startswith("bps"):
+                        unit_found = "%" if not after_lower.startswith("bps") else "bps"
+                
+                if role in {"BASIS_POINT_CHANGE", "SPREAD"}:
+                    unit_found = "bps"
+
+                # Enforce unit requirements by expected role: drop numbers missing expected units
+                if expected_role == ROLE_PERCENT:
+                    if not unit_found or unit_found not in {"%", "bps"}:
+                        continue
+                elif expected_role == ROLE_MONEY:
+                    if not unit_found or not any(c in unit_found.lower() for c in ["inr", "usd", "₹", "$", "rs", "crore", "million", "billion", "lakh"]):
+                        continue
+
+                local_scope = None
+                if re.search(r'april\s*.*?december|apr(?:il)?\s*.*?dec', local_window, re.I):
+                    local_scope = "APR_DEC"
+                elif "full year" in local_window or "annual" in local_window:
+                    local_scope = "FULL_YEAR"
+
+                if "previous year" in local_window or "prior year" in local_window:
+                    other_p = re.search(r'\b(20\d{2}-\d{2})\b', line)
+                    if other_p:
+                        y1 = int(other_p.group(1)[:4])
+                        bound_period = f"FY {y1-1}-{str(y1)[2:]}"
+                    else:
+                        bound_period = line_period
+                else:
+                    p_after = re.search(r'^\s*(?:in|during|for)?\s*(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2}-\d{2}|20\d{2})\b', after, re.I)
+                    p_before = re.search(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2}-\d{2}|20\d{2})\s*(?:in|during|from|to)?\s*$', before, re.I)
+                    if p_after:
+                        bound_period = normalize_period_str(p_after.group(1))
+                    elif p_before:
+                        bound_period = normalize_period_str(p_before.group(1))
+                    else:
+                        p_match = re.search(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2}-\d{2}|20\d{2})\b', local_window, re.I)
+                        if p_match:
+                            bound_period = normalize_period_str(p_match.group(1))
+                        else:
+                            bound_period = line_period
+
+                if local_scope == "APR_DEC" and ("2024" in local_window or "fy25" in local_window or "2024-25" in local_window):
+                    bound_period = "FY 2024-25"
+                elif not local_scope and bound_period == "FY 2024":
+                    bound_period = "FY 2023-24"
+                elif bound_period == "FY 2025":
+                    bound_period = "FY 2024-25"
+                elif bound_period and re.match(r'^\d{4}-\d{2}$', bound_period):
+                    bound_period = f"FY {bound_period}"
+
                 candidates.append({
                     "entity": default_entity,
                     "metric": candidate_metric,
                     "predicate": "was reported as" if "revenue" in candidate_metric.lower() else "reached",
                     "value": display_val,
                     "unit": unit_found or ("shares" if role == ROLE_SHARE_COUNT else None),
-                    "period": line_period,
+                    "period": bound_period,
+                    "period_scope": local_scope,
+                    "scope": local_scope,
                     "raw_quote": line,
                     "binding_method": "sentence_direct",
                     "value_binding_confidence": 0.85,
@@ -381,6 +496,29 @@ def extract_facts_from_chunk_mock(
         line_cands = extract_multi_value_line_candidates(line, doc_filename=doc_filename)
         candidates.extend(line_cands)
 
+    # 3. Reconstruct sentence flow across wrapped lines for narrative paragraphs
+    curr_sentence = []
+    for line in lines:
+        if detect_navigation_reference(line) or is_header_or_unit_label(line):
+            curr_sentence = []
+            continue
+        is_break = bool(re.match(r'^(?:[A-Z0-9\.\s]{4,}|Table\s+|Chart\s+|Appendix\s+|Note:|\d+\.\s+|[IVXLCDM]+\.\d+)', line))
+        if is_break and curr_sentence:
+            joined = " ".join(curr_sentence).strip()
+            if len(curr_sentence) > 1 and len(joined) > 25:
+                candidates.extend(extract_multi_value_line_candidates(joined, doc_filename=doc_filename))
+            curr_sentence = []
+        curr_sentence.append(line)
+        if line.endswith(".") or line.endswith(":"):
+            joined = " ".join(curr_sentence).strip()
+            if len(curr_sentence) > 1 and len(joined) > 25:
+                candidates.extend(extract_multi_value_line_candidates(joined, doc_filename=doc_filename))
+            curr_sentence = []
+    if curr_sentence and len(curr_sentence) > 1:
+        joined = " ".join(curr_sentence).strip()
+        if len(joined) > 25:
+            candidates.extend(extract_multi_value_line_candidates(joined, doc_filename=doc_filename))
+
     valid_facts = []
 
     for cand in candidates:
@@ -388,9 +526,10 @@ def extract_facts_from_chunk_mock(
         cand["subject_entity"] = cand.get("subject_entity") or cand.get("entity") or infer_doc_entity(doc_filename)
         cand["source_organization"] = cand.get("source_organization") or infer_source_organization(doc_filename)
         cand["source_document"] = doc_filename or None
-        cand["period_scope"] = cand.get("period_scope") or resolve_period_scope(quote)
-        cand["estimate_vintage"] = cand.get("estimate_vintage") or resolve_estimate_vintage(quote)
-        index_base = detect_index_base_metadata(quote)
+        if "period_scope" not in cand:
+            cand["period_scope"] = resolve_period_scope(quote)
+        cand["estimate_vintage"] = cand.get("estimate_vintage") or resolve_estimate_vintage(quote) or resolve_estimate_vintage(chunk_text)
+        index_base = detect_index_base_metadata(quote) or detect_index_base_metadata(chunk_text)
         if index_base:
             cand.update(index_base)
         norm = normalize_fact(cand)
@@ -420,7 +559,25 @@ def extract_facts_from_chunk_mock(
         if val_res["valid"]:
             cand["validation_status"] = "valid"
             cand["validation_notes"] = None
-            valid_facts.append(cand)
+            # Deduplicate within chunk by (metric, normalized_value, period, period_scope)
+            dedup_key = (
+                cand.get("metric"),
+                cand.get("normalized_value"),
+                cand.get("period"),
+                cand.get("period_scope"),
+                cand.get("estimate_vintage")
+            )
+            if not any(
+                (
+                    f.get("metric"),
+                    f.get("normalized_value"),
+                    f.get("period"),
+                    f.get("period_scope"),
+                    f.get("estimate_vintage")
+                ) == dedup_key
+                for f in valid_facts
+            ):
+                valid_facts.append(cand)
         else:
             rejected_extractions.append({
                 "page": page_number,
