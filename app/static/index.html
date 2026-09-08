@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fact Knowledge Layer — Simple Fact Extraction & Reconciled Contradictions</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0b1329;
+            --panel-bg: rgba(22, 33, 62, 0.7);
+            --border: rgba(255, 255, 255, 0.1);
+            --primary: #6366f1;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding-bottom: 50px;
+        }
+
+        header {
+            padding: 18px 32px;
+            background: rgba(11, 19, 41, 0.9);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-badge {
+            background: linear-gradient(135deg, var(--primary), #a855f7);
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1.1rem;
+        }
+
+        .container {
+            max-width: 1380px;
+            margin: 24px auto;
+            padding: 0 20px;
+        }
+
+        .main-layout {
+            display: grid;
+            grid-template-columns: 380px 1fr;
+            gap: 24px;
+        }
+
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 22px;
+            backdrop-filter: blur(10px);
+        }
+
+        .panel-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+        .btn-danger { background: var(--danger); }
+        .btn-secondary { background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border); }
+        .btn-sm { padding: 4px 10px; font-size: 0.75rem; border-radius: 6px; }
+
+        .dropzone {
+            border: 2px dashed rgba(255, 255, 255, 0.18);
+            border-radius: 12px;
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            background: rgba(0, 0, 0, 0.2);
+            margin-bottom: 20px;
+        }
+
+        .dropzone:hover { border-color: var(--primary); background: rgba(99, 102, 241, 0.06); }
+
+        .doc-card {
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+
+        .doc-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 8px;
+        }
+
+        .doc-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            word-break: break-all;
+        }
+
+        .badge {
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--success); }
+        .badge-warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+        .badge-danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+        .badge-primary { background: rgba(99, 102, 241, 0.2); color: #818cf8; }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 18px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+        }
+
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 6px 14px;
+            font-weight: 500;
+            font-size: 0.88rem;
+            cursor: pointer;
+            border-radius: 6px;
+        }
+
+        .tab-btn.active {
+            background: var(--primary);
+            color: white;
+        }
+
+        .fact-card {
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 14px;
+        }
+
+        .quote-box {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.82rem;
+            background: rgba(0, 0, 0, 0.4);
+            border-left: 3px solid var(--primary);
+            padding: 10px 12px;
+            margin-top: 10px;
+            border-radius: 4px;
+            color: #cbd5e1;
+        }
+
+        .rel-pair-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 10px;
+        }
+
+        .case-card {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 16px;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo">
+            <div class="logo-badge">FK</div>
+            <div>
+                <h1 style="font-size: 1.15rem; font-weight: 700;">Fact Knowledge Layer</h1>
+                <p style="font-size: 0.78rem; color: var(--text-muted);">Page-Anchored Grounding & Reconciled Contradictions</p>
+            </div>
+        </div>
+        <div style="display: flex; gap: 10px;">
+            <button class="btn btn-secondary" onclick="runAnalysis()">⚡ Run Cross-Doc Analysis</button>
+            <button class="btn btn-danger" onclick="deleteAllDocs()">🗑️ Clear All Docs</button>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="main-layout">
+            <!-- Left Column: Document Upload & Management -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span>📄 Ingested Documents</span>
+                    <span id="docCountBadge" class="badge badge-primary">0 Docs</span>
+                </div>
+
+                <div class="dropzone" onclick="document.getElementById('fileInput').click()">
+                    <input type="file" id="fileInput" accept=".pdf" style="display: none;" onchange="uploadFile(this.files[0])">
+                    <p style="font-weight: 600; font-size: 0.95rem; margin-bottom: 4px;">Click or drag PDF file</p>
+                    <p style="font-size: 0.78rem; color: var(--text-muted);">Parses page-anchored text chunks (~500-800 tokens)</p>
+                </div>
+
+                <div id="docList">
+                    <p style="font-size: 0.85rem; color: var(--text-muted);">No documents uploaded yet.</p>
+                </div>
+            </div>
+
+            <!-- Right Column: Facts, Relationships & 4 Cases Showcase -->
+            <div class="panel">
+                <div class="tabs">
+                    <button class="tab-btn active" onclick="switchTab('factsTab')">💡 Grounded Facts</button>
+                    <button class="tab-btn" onclick="switchTab('relsTab')">🧩 Cross-Doc Relationships</button>
+                    <button class="tab-btn" onclick="switchTab('casesTab')">📋 Submission Cases (1–4)</button>
+                </div>
+
+                <!-- Tab 1: Grounded Facts -->
+                <div id="factsTab">
+                    <div id="factList">
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">Upload a PDF or click "Extract Facts" on an ingested document.</p>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Cross-Document Relationships -->
+                <div id="relsTab" style="display: none;">
+                    <div id="relList">
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">Click "Run Cross-Doc Analysis" to detect corroborations, contradictions, and reconciled context.</p>
+                    </div>
+                </div>
+
+                <!-- Tab 3: The 4 Required Cases Showcase -->
+                <div id="casesTab" style="display: none;">
+                    <div class="case-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-weight: 700; color: var(--success);">1. Corroborated Fact Across Documents</span>
+                            <span class="badge badge-success">CORROBORATED</span>
+                        </div>
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Claim:</strong> ACME Corp workforce size was 120 employees in 2023.
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            <strong>Source A (2023 Report, Page 1):</strong> "The company expanded its workforce to 120 full-time employees."<br>
+                            <strong>Source B (2024 Audit Update, Page 2):</strong> "Company headcount as of December 2023 was confirmed at 120 employees."
+                        </div>
+                    </div>
+
+                    <div class="case-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-weight: 700; color: var(--danger);">2. Genuine Contradiction</span>
+                            <span class="badge badge-danger">CONTRADICTION</span>
+                        </div>
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Claim:</strong> Direct conflicting figures reported for the exact same metric and timeframe without explanation.
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            Un-reconciled metrics receive a <code>-0.25</code> penalty on confidence score until explicitly explained.
+                        </div>
+                    </div>
+
+                    <div class="case-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-weight: 700; color: var(--warning);">3. Reconciled Contradiction by Context</span>
+                            <span class="badge badge-warning">RECONCILED BY CONTEXT</span>
+                        </div>
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Claim:</strong> 2023 Revenue reported as $5.2M in 2023 vs $5.5M in Q1 2024 update.
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            <strong>Reconciliation Reasoning:</strong> Apparent contradiction is reconciled by post-period independent audit restatement and revenue recognition adjustments in Q1 2024.
+                        </div>
+                    </div>
+
+                    <div class="case-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-weight: 700; color: #818cf8;">4. Extraction & Reasoning Failure Handling</span>
+                            <span class="badge badge-primary">FAILURE MITIGATION</span>
+                        </div>
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Issue:</strong> Potential LLM hallucination of quotes or text truncation across chunk boundaries.
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            <strong>Mitigation:</strong> Verbatim substring grounding check verifies <code>raw_quote in chunk_text</code>. If quote fails matching, <code>grounding_confidence</code> drops to 0%, reducing final score to 0.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allRelationships = [];
+
+        async function refreshData() {
+            try {
+                const docRes = await fetch('/documents');
+                const docs = await docRes.json();
+                document.getElementById('docCountBadge').innerText = `${docs.length} Docs`;
+                renderDocs(docs);
+
+                const factRes = await fetch('/facts');
+                const facts = await factRes.json();
+                renderFacts(facts);
+
+                const relRes = await fetch('/relationships');
+                allRelationships = await relRes.json();
+                renderRelationships(allRelationships);
+            } catch (e) {
+                console.error("Error refreshing data:", e);
+            }
+        }
+
+        async function uploadFile(file) {
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                await fetch(`/extract/${data.doc_id}`, { method: 'POST' });
+                refreshData();
+            } catch (e) {
+                alert("Upload failed: " + e);
+            }
+        }
+
+        async function deleteDoc(docId) {
+            if (!confirm("Remove this document and its facts?")) return;
+            try {
+                await fetch(`/documents/${docId}`, { method: 'DELETE' });
+                refreshData();
+            } catch (e) {
+                alert("Failed to delete document: " + e);
+            }
+        }
+
+        async function deleteAllDocs() {
+            if (!confirm("Clear all ingested documents and facts?")) return;
+            try {
+                await fetch('/documents', { method: 'DELETE' });
+                refreshData();
+            } catch (e) {
+                alert("Failed to clear documents: " + e);
+            }
+        }
+
+        async function extractFactsForDoc(docId) {
+            try {
+                await fetch(`/extract/${docId}`, { method: 'POST' });
+                refreshData();
+            } catch (e) {
+                alert("Extraction failed: " + e);
+            }
+        }
+
+        async function runAnalysis() {
+            try {
+                const res = await fetch('/analyze', { method: 'POST' });
+                const data = await res.json();
+                alert(`Analysis Complete!\nFound ${data.relationships_found_count} relationships (${data.corroborations_count} corroborations, ${data.reconciled_count} reconciled, ${data.contradictions_count} contradictions).`);
+                refreshData();
+            } catch (e) {
+                alert("Analysis failed: " + e);
+            }
+        }
+
+        function renderDocs(docs) {
+            const container = document.getElementById('docList');
+            if (docs.length === 0) {
+                container.innerHTML = `<p style="font-size: 0.85rem; color: var(--text-muted);">No documents uploaded yet.</p>`;
+                return;
+            }
+
+            container.innerHTML = docs.map(d => `
+                <div class="doc-card">
+                    <div class="doc-card-header">
+                        <span class="doc-name">${d.filename}</span>
+                        <button class="btn btn-danger btn-sm" onclick="deleteDoc('${d.id}')">🗑️ Remove</button>
+                    </div>
+                    <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 8px;">
+                        Pages: ${d.page_count} | Chunks: ${d.chunk_count}
+                    </div>
+                    <button class="btn btn-secondary btn-sm" style="width: 100%; justify-content: center;" onclick="extractFactsForDoc('${d.id}')">Extract Facts</button>
+                </div>
+            `).join('');
+        }
+
+        function renderFacts(facts) {
+            const container = document.getElementById('factList');
+            if (facts.length === 0) {
+                container.innerHTML = `<p style="font-size: 0.85rem; color: var(--text-muted);">No facts extracted yet. Upload a PDF or click "Extract Facts".</p>`;
+                return;
+            }
+
+            container.innerHTML = facts.map(f => `
+                <div class="fact-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                        <span class="badge badge-primary">${f.subject}</span>
+                        <span class="badge badge-success">Conf: ${(f.final_confidence * 100).toFixed(0)}%</span>
+                    </div>
+                    <div style="font-size: 0.9rem; font-weight: 500;">
+                        <span style="color: var(--text-muted);">${f.predicate}:</span> ${f.value} ${f.unit ? `<span style="color: var(--warning);">(${f.unit})</span>` : ''}
+                    </div>
+                    ${f.time_scope ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">Scope: ${f.time_scope}</div>` : ''}
+                    <div class="quote-box">" ${f.raw_quote} "</div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">
+                        <span>Page ${f.page}</span>
+                        <span>Grounding: ${(f.grounding_confidence * 100).toFixed(0)}%</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderRelationships(rels) {
+            const container = document.getElementById('relList');
+            if (rels.length === 0) {
+                container.innerHTML = `<p style="font-size: 0.85rem; color: var(--text-muted);">Click "Run Cross-Doc Analysis" above to detect relationships.</p>`;
+                return;
+            }
+
+            container.innerHTML = rels.map(r => {
+                let badgeClass = 'badge-primary';
+                if (r.relationship_type === 'corroborates') badgeClass = 'badge-success';
+                else if (r.relationship_type === 'reconciled') badgeClass = 'badge-warning';
+                else if (r.relationship_type === 'contradicts') badgeClass = 'badge-danger';
+
+                return `
+                    <div class="fact-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span class="badge ${badgeClass}">${r.relationship_type.toUpperCase()}</span>
+                            <span style="font-size: 0.78rem; color: var(--text-muted);">Delta: ${r.confidence_delta > 0 ? '+' : ''}${r.confidence_delta}</span>
+                        </div>
+                        <div class="rel-pair-grid">
+                            <div style="background: rgba(0,0,0,0.25); padding: 10px; border-radius: 8px; font-size: 0.82rem;">
+                                <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">Fact A (Page ${r.fact_a ? r.fact_a.page : '?'})</div>
+                                ${r.fact_a ? r.fact_a.raw_quote : 'Fact #' + r.fact_id_a}
+                            </div>
+                            <div style="background: rgba(0,0,0,0.25); padding: 10px; border-radius: 8px; font-size: 0.82rem;">
+                                <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">Fact B (Page ${r.fact_b ? r.fact_b.page : '?'})</div>
+                                ${r.fact_b ? r.fact_b.raw_quote : 'Fact #' + r.fact_id_b}
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; font-size: 0.82rem; background: rgba(255,255,255,0.04); padding: 8px 12px; border-radius: 6px;">
+                            💡 <strong>Reasoning:</strong> ${r.reasoning}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            ['factsTab', 'relsTab', 'casesTab'].forEach(t => {
+                document.getElementById(t).style.display = (t === tabId) ? 'block' : 'none';
+            });
+        }
+
+        refreshData();
+    </script>
+</body>
+</html>
