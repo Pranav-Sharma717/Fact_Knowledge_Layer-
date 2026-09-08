@@ -63,8 +63,8 @@ KNOWN_METRIC_PATTERNS = [
     (r'\bebitda\b', 'EBITDA', ROLE_MONEY),
     (r'net\s+profit', 'Net Profit', ROLE_MONEY),
     (r'profit\s+after\s+tax', 'Profit After Tax', ROLE_MONEY),
+    (r'female\s+workers?|female\s+workforce|women\s+employees|headcount\s+of\s+women', 'Female Workforce Growth', ROLE_PERCENT),
     (r'headcount|employee\s+count|workforce', 'Workforce Size', ROLE_COUNT),
-    (r'female\s+workers?|female\s+workforce', 'Female Workforce Growth', ROLE_PERCENT),
     (r'attrition\s+rate|employee\s+attrition', 'Employee Attrition Rate', ROLE_PERCENT),
     (r'(?:real\s+)?(?:gross\s+domestic\s+product|\(?gdp\)?)(?:\s*\(gdp\))?(?:\d+)?\s+growth', 'GDP Growth Rate', ROLE_PERCENT),
     (r'inflation\s+rate|cpi|headline\s+inflation', 'Inflation Rate', ROLE_PERCENT),
@@ -110,6 +110,14 @@ def infer_source_organization(doc_filename: str) -> Optional[str]:
         return "Ministry of Finance, Government of India"
     if "delhivery" in name:
         return "Delhivery Limited"
+    return None
+
+def infer_doc_default_period(doc_filename: str) -> Optional[str]:
+    fn = (doc_filename or "").lower()
+    if "fy24" in fn or "2023-24" in fn:
+        return "FY 2023-24"
+    if "fy25" in fn or "2024-25" in fn:
+        return "FY 2024-25"
     return None
 
 def resolve_period_scope(text: str) -> Optional[str]:
@@ -239,6 +247,17 @@ def extract_series_alignment_candidates(chunk_text: str, doc_filename: str = "")
                                and len(re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', lines[k], re.I)) < 2
                                and len(re.findall(r'\b[a-zA-Z]{3,}\b', lines[k])) <= 2
                                and not any(w in lines[k].lower() for w in ["tolerance", "(+/-)", "+/-"])), None)
+        if not value_line and i >= len(norm_periods):
+            cand_lines = lines[i - len(norm_periods) : i]
+            if all(re.match(r'^\(?[-+]?\d+(?:,\d+)*(?:\.\d+)?%?\)?$', l.strip()) for l in cand_lines):
+                header_idx = i - len(norm_periods) - 1
+                if header_idx >= 0:
+                    lbl = lines[header_idx]
+                    if is_header_or_unit_label(lbl) and header_idx - 1 >= 0:
+                        lbl = lines[header_idx - 1]
+                    if any(re.search(p, lbl, re.I) for p, _, _ in KNOWN_METRIC_PATTERNS):
+                        value_line = ' '.join(cand_lines)
+                        metric_line = lbl
         if not metric_line or not value_line:
             continue
         metric_match = next(((name, role) for pattern, name, role in KNOWN_METRIC_PATTERNS
@@ -443,6 +462,9 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                             bound_period = normalize_period_str(p_match.group(1))
                         else:
                             bound_period = line_period
+
+                if not bound_period and ("year-on-year" in clean_line or "yoy" in clean_line or "annual" in clean_line):
+                    bound_period = infer_doc_default_period(doc_filename)
 
                 if local_scope == "APR_DEC" and ("2024" in local_window or "fy25" in local_window or "2024-25" in local_window):
                     bound_period = "FY 2024-25"

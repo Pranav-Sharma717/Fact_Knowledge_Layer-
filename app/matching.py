@@ -179,9 +179,6 @@ def find_candidate_pairs(
             if not is_relationship_eligible_fact(f_b):
                 continue
             
-            if f_a["document_id"] == f_b["document_id"]:
-                continue
-                
             pair_key = (min(f_a["id"], f_b["id"]), max(f_a["id"], f_b["id"]))
             if pair_key in seen_pairs:
                 continue
@@ -200,11 +197,21 @@ def find_candidate_pairs(
             s_a = (f_a.get("period_scope") or f_a.get("scope") or "").strip().upper()
             s_b = (f_b.get("period_scope") or f_b.get("scope") or "").strip().upper()
 
+            ent_a = (f_a.get("subject_entity") or f_a.get("entity") or "").strip().lower()
+            ent_b = (f_b.get("subject_entity") or f_b.get("entity") or "").strip().lower()
+            same_entity = (ent_a == ent_b) or ("delhivery" in ent_a and "delhivery" in ent_b) or ("india" in ent_a and "india" in ent_b) or (not ent_a or not ent_b)
+
             is_exact_block = (
                 canon_a == canon_b
                 and canon_a not in {"unspecified_metric", "general_metric"}
-                and (f_a.get("subject_entity") or f_a.get("entity")) == (f_b.get("subject_entity") or f_b.get("entity"))
+                and same_entity
             )
+
+            is_same_doc = (f_a.get("document_id") == f_b.get("document_id"))
+            if is_same_doc:
+                # Intra-document candidate: only allow exact canonical blocks with differing values (e.g. internal contradictions)
+                if not (is_exact_block and f_a.get("normalized_value") != f_b.get("normalized_value")):
+                    continue
 
             priority = 0.0
             if canon_a == canon_b and canon_a not in {"unspecified_metric", "general_metric"}:
