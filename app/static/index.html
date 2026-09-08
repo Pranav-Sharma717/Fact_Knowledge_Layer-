@@ -652,28 +652,34 @@
 
         function renderRejected(rejectedData) {
             const container = document.getElementById('rejectedList');
-            if (!rejectedData || !rejectedData.groups || rejectedData.groups.length === 0) {
+            if (!rejectedData || !rejectedData.groups) {
+                container.innerHTML = `<p style="font-size: 0.85rem; color: var(--text-muted);">No rejected extractions logged.</p>`;
+                return;
+            }
+
+            const entries = Object.entries(rejectedData.groups).filter(([_, items]) => items && items.length > 0);
+            if (entries.length === 0) {
                 container.innerHTML = `<p style="font-size: 0.85rem; color: var(--text-muted);">No rejected extractions logged.</p>`;
                 return;
             }
 
             container.innerHTML = `
                 <div style="margin-bottom: 12px; font-size: 0.88rem; color: var(--text-muted);">
-                    Total Rejected Candidates: <strong>${rejectedData.total_rejected}</strong> (Grouped by Failure Type)
+                    Total Rejected Candidates: <strong>${rejectedData.total_rejected || 0}</strong> (Grouped by Failure Type)
                 </div>
-                ${rejectedData.groups.map((grp, idx) => `
+                ${entries.map(([category, items], idx) => `
                     <details class="fact-card" style="border-left: 4px solid var(--warning);" ${idx === 0 ? 'open' : ''}>
                         <summary style="cursor: pointer; font-weight: 600; font-size: 0.9rem; color: var(--text-main);">
-                            ${grp.category} <span class="badge badge-warning">${grp.count} candidates</span>
+                            ${category} <span class="badge badge-warning">${items.length} candidates</span>
                         </summary>
                         <div style="margin-top: 10px;">
-                            ${grp.sample_items.map(rj => `
+                            ${items.slice(0, 50).map(rj => `
                                 <div style="background: rgba(0,0,0,0.3); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
                                     <div style="font-size: 0.82rem; font-family: monospace; color: #cbd5e1; margin-bottom: 4px;">
-                                        ${rj.candidate_text}
+                                        ${rj.candidate_text || ''}
                                     </div>
                                     <div style="font-size: 0.78rem; color: var(--danger);">
-                                        🚫 ${rj.rejection_reason} (Page ${rj.page})
+                                        🚫 ${rj.rejection_reason || ''} (Page ${rj.page || '?'})
                                     </div>
                                 </div>
                             `).join('')}
