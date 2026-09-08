@@ -18,7 +18,7 @@ from app.models import (
 app = FastAPI(
     title="Fact Knowledge Layer API",
     description="Ingest PDFs, extract grounded facts, match candidate pairs via local embeddings, and reconcile cross-document relationships.",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 app.add_middleware(
@@ -43,7 +43,7 @@ def read_root():
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "1.1.0"}
+    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "1.2.0"}
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...)):
@@ -102,15 +102,26 @@ def list_documents():
 
 @app.delete("/documents/{doc_id}")
 def delete_document(doc_id: str):
-    """Deletes an unwanted document and all associated chunks and facts."""
+    """Deletes an unwanted document and all associated chunks, facts, and relationships."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute(
+            """
+            DELETE FROM fact_relationships
+            WHERE fact_id_a IN (SELECT id FROM facts WHERE document_id = ?)
+               OR fact_id_b IN (SELECT id FROM facts WHERE document_id = ?)
+            """,
+            (doc_id, doc_id)
+        )
+        cursor.execute("DELETE FROM facts WHERE document_id = ?", (doc_id,))
+        cursor.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
         cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Document not found.")
         conn.commit()
         return {"status": "success", "message": f"Document {doc_id} deleted successfully."}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
     finally:
         conn.close()
 
@@ -126,6 +137,9 @@ def delete_all_documents():
         cursor.execute("DELETE FROM documents")
         conn.commit()
         return {"status": "success", "message": "All documents and facts cleared."}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to clear documents: {str(e)}")
     finally:
         conn.close()
 

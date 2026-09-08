@@ -7,12 +7,12 @@ def get_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=60.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     cursor = conn.cursor()
     
     # Documents table
@@ -82,4 +82,4 @@ def init_db():
 
 if __name__ == "__main__":
     init_db()
-    print("Database initialized with WAL mode and 60s timeout.")
+    print("Database initialized cleanly.")
