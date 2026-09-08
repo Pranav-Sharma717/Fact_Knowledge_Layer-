@@ -50,6 +50,8 @@ def init_db():
         chunk_id INTEGER NOT NULL,
         subject TEXT NOT NULL DEFAULT 'Unknown Entity',
         entity TEXT NOT NULL DEFAULT 'Unknown Entity',
+        subject_entity TEXT,
+        source_organization TEXT,
         metric TEXT NOT NULL DEFAULT 'General Assertion',
         predicate TEXT NOT NULL DEFAULT 'states',
         value TEXT NOT NULL,
@@ -58,6 +60,10 @@ def init_db():
         normalized_value REAL,
         normalized_unit TEXT,
         period TEXT,
+        period_scope TEXT,
+        estimate_vintage TEXT,
+        index_base_year INTEGER,
+        index_base_value INTEGER,
         as_of_date TEXT,
         scope TEXT,
         qualifiers TEXT,
@@ -75,6 +81,8 @@ def init_db():
         extraction_method TEXT NOT NULL DEFAULT 'llm',
         validation_status TEXT NOT NULL DEFAULT 'valid',
         validation_notes TEXT,
+        binding_method TEXT NOT NULL DEFAULT 'sentence_direct',
+        pipeline_version INTEGER NOT NULL DEFAULT 4,
         FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE,
         FOREIGN KEY (chunk_id) REFERENCES chunks (id) ON DELETE CASCADE
     );
@@ -87,11 +95,17 @@ def init_db():
     needed_cols = [
         ("subject", "TEXT NOT NULL DEFAULT 'Unknown Entity'"),
         ("entity", "TEXT NOT NULL DEFAULT 'Unknown Entity'"),
+        ("subject_entity", "TEXT"),
+        ("source_organization", "TEXT"),
         ("metric", "TEXT NOT NULL DEFAULT 'General Assertion'"),
         ("numeric_value", "REAL"),
         ("normalized_value", "REAL"),
         ("normalized_unit", "TEXT"),
         ("period", "TEXT"),
+        ("period_scope", "TEXT"),
+        ("estimate_vintage", "TEXT"),
+        ("index_base_year", "INTEGER"),
+        ("index_base_value", "INTEGER"),
         ("as_of_date", "TEXT"),
         ("scope", "TEXT"),
         ("qualifiers", "TEXT"),
@@ -111,7 +125,7 @@ def init_db():
         if col_name not in existing_cols:
             cursor.execute(f"ALTER TABLE facts ADD COLUMN {col_name} {col_def};")
 
-    # Rejected Extractions table (Task 8 & 14)
+    # Rejected Extractions table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS rejected_extractions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,7 +181,6 @@ def init_db():
     if "pipeline_version" not in rel_cols:
         cursor.execute("ALTER TABLE fact_relationships ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 4;")
 
-    # Invalidate stale pipeline records from older software versions (User Review Fix 8)
     cursor.execute("DELETE FROM fact_relationships WHERE pipeline_version < 4;")
     cursor.execute("DELETE FROM facts WHERE pipeline_version < 4;")
 
