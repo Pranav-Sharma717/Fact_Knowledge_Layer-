@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
+import json
 import sqlite3
 from typing import List, Optional
 
@@ -12,13 +13,14 @@ from app.extraction import extract_facts_from_chunk
 from app.matching import find_candidate_pairs, judge_relationship, recalculate_fact_confidences
 from app.models import (
     UploadResponse, DocumentResponse, ChunkResponse,
-    FactItem, ExtractionResponse, RelationshipItem, AnalysisResponse
+    FactItem, RejectedExtractionItem, ExtractionResponse,
+    RelationshipItem, AnalysisResponse, AssignmentCasesResponse
 )
 
 app = FastAPI(
     title="Fact Knowledge Layer API",
-    description="Ingest PDFs, extract grounded facts, match candidate pairs via local embeddings, and reconcile cross-document relationships.",
-    version="1.3.0"
+    description="Ingest PDFs, extract grounded facts, match candidate pairs, filter comparability, and reconcile cross-document relationships.",
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -39,11 +41,11 @@ def on_startup():
 
 @app.get("/", response_class=FileResponse)
 def read_root():
-    """Serves the simplified glassmorphism Web Dashboard UI."""
+    """Serves the glassmorphism Web Dashboard UI."""
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "1.3.0"}
+    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "2.0.0"}
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...)):
@@ -102,7 +104,7 @@ def list_documents():
 
 @app.delete("/documents/{doc_id}")
 def delete_document(doc_id: str):
-    """Deletes an unwanted document and all associated chunks, facts, and relationships."""
+    """Deletes an unwanted document and all associated chunks, facts, rejected extractions, and relationships."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -114,6 +116,7 @@ def delete_document(doc_id: str):
             """,
             (doc_id, doc_id)
         )
+        cursor.execute("DELETE FROM rejected_extractions WHERE document_id = ?", (doc_id,))
         cursor.execute("DELETE FROM facts WHERE document_id = ?", (doc_id,))
         cursor.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
         cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
@@ -127,11 +130,12 @@ def delete_document(doc_id: str):
 
 @app.delete("/documents")
 def delete_all_documents():
-    """Deletes all ingested documents, chunks, facts, and relationships."""
+    """Deletes all ingested documents, chunks, facts, rejected extractions, and relationships."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM fact_relationships")
+        cursor.execute("DELETE FROM rejected_extractions")
         cursor.execute("DELETE FROM facts")
         cursor.execute("DELETE FROM chunks")
         cursor.execute("DELETE FROM documents")
@@ -158,11 +162,17 @@ def get_document_chunks(doc_id: str):
         conn.close()
 
 @app.post("/extract/{doc_id}", response_model=ExtractionResponse)
-def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)):
-    """Extracts facts from all chunks of a document, verifies evidence grounding, and saves to SQLite."""
+def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None), model: Optional[str] = Query(None)):
+    """Extracts facts from all chunks of a document, verifies evidence grounding, validates candidates, and saves valid/rejected items to SQLite."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT filename FROM documents WHERE id = ?", (doc_id,))
+        doc_row = cursor.fetchone()
+        if not doc_row:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        doc_filename = doc_row["filename"]
+
         cursor.execute("SELECT id, text, page_number FROM chunks WHERE document_id = ? ORDER BY chunk_index ASC", (doc_id,))
         chunks = cursor.fetchall()
         if not chunks:
@@ -170,38 +180,86 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
     finally:
         conn.close()
         
-    extracted_records = []
+    all_valid_facts = []
+    all_rejected = []
+    extraction_methods = []
+    combined_warnings = []
+    
     for chunk in chunks:
         c_id = chunk["id"]
         c_text = chunk["text"]
         p_num = chunk["page_number"]
-        extracted = extract_facts_from_chunk(c_text, p_num, api_key=api_key)
-        for f in extracted:
-            extracted_records.append((c_id, f))
+        
+        valid_facts, rejected_list, method, warnings = extract_facts_from_chunk(
+            c_text, p_num, api_key=api_key, model=model, doc_filename=doc_filename
+        )
+        
+        extraction_methods.append(method)
+        combined_warnings.extend(warnings)
+        
+        for vf in valid_facts:
+            all_valid_facts.append((c_id, vf))
+        for rj in rejected_list:
+            all_rejected.append(rj)
             
+    overall_mode = "degraded" if "fallback" in extraction_methods else "normal"
+    unique_warnings = list(dict.fromkeys(combined_warnings))
+
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM facts WHERE document_id = ?", (doc_id,))
+        cursor.execute("DELETE FROM rejected_extractions WHERE document_id = ?", (doc_id,))
+        
         saved_facts = []
-        for c_id, f in extracted_records:
+        for c_id, f in all_valid_facts:
+            subj = f.get("subject") or f.get("entity") or "Unknown Entity"
+            ent = f.get("entity") or f.get("subject") or "Unknown Entity"
             cursor.execute(
                 """
                 INSERT INTO facts (
-                    document_id, chunk_id, subject, predicate, value, unit, time_scope,
-                    raw_quote, page, extraction_confidence, grounding_confidence, final_confidence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    document_id, chunk_id, subject, entity, metric, predicate, value, numeric_value, unit,
+                    normalized_value, normalized_unit, period, as_of_date, scope, qualifiers,
+                    raw_quote, page, extraction_confidence, grounding_confidence, final_confidence,
+                    extraction_method, validation_status, validation_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    doc_id, c_id, f["subject"], f["predicate"], f["value"], f["unit"],
-                    f["time_scope"], f["raw_quote"], f["page"], f["extraction_confidence"],
-                    f["grounding_confidence"], f["final_confidence"]
+                    doc_id, c_id, subj, ent, f.get("metric", "General Assertion"),
+                    f.get("predicate", "states"), f.get("value"), f.get("numeric_value"), f.get("unit"),
+                    f.get("normalized_value"), f.get("normalized_unit"), f.get("period"), f.get("as_of_date"),
+                    f.get("scope"), f.get("qualifiers"), f.get("raw_quote"), f.get("page"),
+                    f.get("extraction_confidence", 0.9), f.get("grounding_confidence", 1.0),
+                    f.get("final_confidence", 0.9), f.get("extraction_method", "llm"),
+                    f.get("validation_status", "valid"), f.get("validation_notes")
                 )
             )
             f_id = cursor.lastrowid
             saved_facts.append(FactItem(id=f_id, document_id=doc_id, chunk_id=c_id, **f))
+
+        saved_rejected = []
+        for rj in all_rejected:
+            cursor.execute(
+                """
+                INSERT INTO rejected_extractions (
+                    document_id, page, candidate_text, attempted_extraction, failure_type, rejection_reason
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (doc_id, rj["page"], rj["candidate_text"], rj["attempted_extraction"], rj["failure_type"], rj["rejection_reason"])
+            )
+            r_id = cursor.lastrowid
+            saved_rejected.append(RejectedExtractionItem(id=r_id, document_id=doc_id, **rj))
+
         conn.commit()
-        return ExtractionResponse(doc_id=doc_id, facts_extracted_count=len(saved_facts), facts=saved_facts)
+        return ExtractionResponse(
+            doc_id=doc_id,
+            facts_extracted_count=len(saved_facts),
+            rejected_count=len(saved_rejected),
+            mode=overall_mode,
+            warnings=unique_warnings,
+            facts=saved_facts,
+            rejected_extractions=saved_rejected
+        )
     finally:
         conn.close()
 
@@ -229,15 +287,27 @@ def list_all_facts():
     finally:
         conn.close()
 
+@app.get("/rejected-extractions", response_model=List[RejectedExtractionItem])
+def list_rejected_extractions():
+    """List all rejected candidates stored in SQLite (Task 8 compliance)."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM rejected_extractions ORDER BY id ASC")
+        rows = cursor.fetchall()
+        return [RejectedExtractionItem(**dict(r)) for r in rows]
+    finally:
+        conn.close()
+
 @app.post("/analyze", response_model=AnalysisResponse)
 def analyze_cross_document_relationships(
     similarity_threshold: float = Query(0.35),
-    max_candidates: int = Query(25),
+    max_candidates: int = Query(30),
     api_key: Optional[str] = Query(None)
 ):
     """
-    Runs cross-document relationship detection in memory,
-    then updates database in a single fast <10ms transaction.
+    Runs cross-document relationship detection with comparability filtering,
+    strict enum classification, and database updates in a single fast transaction.
     """
     conn = get_db_connection()
     try:
@@ -251,7 +321,8 @@ def analyze_cross_document_relationships(
     if len(facts) < 2:
         return AnalysisResponse(
             candidate_pairs_evaluated=0, relationships_found_count=0,
-            corroborations_count=0, contradictions_count=0, reconciled_count=0, relationships=[]
+            corroborations_count=0, contradictions_count=0, likely_contradictions_count=0,
+            reconciled_count=0, unrelated_count=0, uncertain_count=0, relationships=[]
         )
         
     candidate_pairs = find_candidate_pairs(facts, similarity_threshold=similarity_threshold, max_candidates=max_candidates)
@@ -259,37 +330,48 @@ def analyze_cross_document_relationships(
     evaluated_results = []
     corroborations = 0
     contradictions = 0
+    likely_contradictions = 0
     reconciled = 0
+    unrelated = 0
+    uncertain = 0
     
     for fact_a, fact_b, sim_score in candidate_pairs:
         judge_res = judge_relationship(fact_a, fact_b, api_key=api_key)
         rel_type = judge_res["relationship"]
-        if rel_type == "unrelated":
-            continue
-            
-        if rel_type == "corroborates":
-            corroborations += 1
-        elif rel_type == "contradicts":
-            contradictions += 1
-        elif rel_type == "reconciled":
-            reconciled += 1
-            
-        evaluated_results.append((fact_a, fact_b, rel_type, judge_res["reasoning"], judge_res["confidence_delta"]))
         
-    # Write results to database in a single fast transaction (<10ms lock)
+        if rel_type == "CORROBORATES":
+            corroborations += 1
+        elif rel_type == "CONTRADICTS":
+            contradictions += 1
+        elif rel_type == "LIKELY_CONTRADICTION":
+            likely_contradictions += 1
+        elif rel_type == "RECONCILED":
+            reconciled += 1
+        elif rel_type == "UNRELATED":
+            unrelated += 1
+        else:
+            uncertain += 1
+            
+        evaluated_results.append((
+            fact_a, fact_b, rel_type, judge_res["reasoning"],
+            judge_res["confidence_delta"], judge_res["comparison_delta"], judge_res["reconciliation_type"]
+        ))
+        
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM fact_relationships")
         
         relationships = []
-        for fact_a, fact_b, rel_type, reasoning, conf_delta in evaluated_results:
+        for fact_a, fact_b, rel_type, reasoning, conf_delta, comp_delta, reconc_type in evaluated_results:
             cursor.execute(
                 """
-                INSERT INTO fact_relationships (fact_id_a, fact_id_b, relationship_type, reasoning, confidence_delta)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO fact_relationships (
+                    fact_id_a, fact_id_b, relationship_type, reasoning, confidence, confidence_delta,
+                    comparison_delta, reconciliation_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (fact_a["id"], fact_b["id"], rel_type, reasoning, conf_delta)
+                (fact_a["id"], fact_b["id"], rel_type, reasoning, conf_delta, conf_delta, comp_delta, reconc_type)
             )
             rel_id = cursor.lastrowid
             relationships.append(
@@ -299,7 +381,9 @@ def analyze_cross_document_relationships(
                     fact_id_b=fact_b["id"],
                     relationship_type=rel_type,
                     reasoning=reasoning,
-                    confidence_delta=conf_delta,
+                    confidence=conf_delta,
+                    comparison_delta=comp_delta,
+                    reconciliation_type=reconc_type,
                     fact_a=FactItem(**fact_a),
                     fact_b=FactItem(**fact_b)
                 )
@@ -313,7 +397,10 @@ def analyze_cross_document_relationships(
             relationships_found_count=len(relationships),
             corroborations_count=corroborations,
             contradictions_count=contradictions,
+            likely_contradictions_count=likely_contradictions,
             reconciled_count=reconciled,
+            unrelated_count=unrelated,
+            uncertain_count=uncertain,
             relationships=relationships
         )
     finally:
@@ -342,3 +429,21 @@ def list_relationships():
         return results
     finally:
         conn.close()
+
+@app.get("/cases", response_model=AssignmentCasesResponse)
+def get_submission_cases():
+    """Returns the 4 explicit submission cases for evaluator review."""
+    rels = list_relationships()
+    rejected = list_rejected_extractions()
+    
+    corr_case = next((r for r in rels if r.relationship_type == "CORROBORATES"), None)
+    contra_case = next((r for r in rels if r.relationship_type in {"CONTRADICTS", "LIKELY_CONTRADICTION"}), None)
+    reconc_case = next((r for r in rels if r.relationship_type == "RECONCILED"), None)
+    failure_case = rejected[0] if rejected else None
+    
+    return AssignmentCasesResponse(
+        corroborated_case=corr_case,
+        likely_contradiction_case=contra_case,
+        reconciled_case=reconc_case,
+        extraction_failure_case=failure_case
+    )

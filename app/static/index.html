@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fact Knowledge Layer — Simple Fact Extraction & Reconciled Contradictions</title>
+    <title>Fact Knowledge Layer — Intelligence System</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -62,7 +62,7 @@
         }
 
         .container {
-            max-width: 1380px;
+            max-width: 1400px;
             margin: 24px auto;
             padding: 0 20px;
         }
@@ -149,12 +149,14 @@
             font-size: 0.72rem;
             font-weight: 600;
             text-transform: uppercase;
+            display: inline-block;
         }
 
         .badge-success { background: rgba(16, 185, 129, 0.2); color: var(--success); }
         .badge-warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
         .badge-danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
         .badge-primary { background: rgba(99, 102, 241, 0.2); color: #818cf8; }
+        .badge-muted { background: rgba(148, 163, 184, 0.2); color: var(--text-muted); }
 
         .tabs {
             display: flex;
@@ -162,6 +164,7 @@
             margin-bottom: 18px;
             border-bottom: 1px solid var(--border);
             padding-bottom: 10px;
+            overflow-x: auto;
         }
 
         .tab-btn {
@@ -173,6 +176,7 @@
             font-size: 0.88rem;
             cursor: pointer;
             border-radius: 6px;
+            white-space: nowrap;
         }
 
         .tab-btn.active {
@@ -197,6 +201,7 @@
             margin-top: 10px;
             border-radius: 4px;
             color: #cbd5e1;
+            word-break: break-word;
         }
 
         .rel-pair-grid {
@@ -213,6 +218,35 @@
             padding: 18px;
             margin-bottom: 16px;
         }
+
+        .confidence-bar-container {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 6px;
+        }
+
+        .confidence-bar-fill {
+            height: 100%;
+            background: var(--success);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .degraded-banner {
+            background: rgba(245, 158, 11, 0.15);
+            border: 1px solid var(--warning);
+            color: var(--warning);
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
     </style>
 </head>
 <body>
@@ -222,7 +256,7 @@
             <div class="logo-badge">FK</div>
             <div>
                 <h1 style="font-size: 1.15rem; font-weight: 700;">Fact Knowledge Layer</h1>
-                <p style="font-size: 0.78rem; color: var(--text-muted);">Page-Anchored Grounding & Reconciled Contradictions</p>
+                <p style="font-size: 0.78rem; color: var(--text-muted);">Page-Anchored Grounding, Normalization & Reconciled Contradictions</p>
             </div>
         </div>
         <div style="display: flex; gap: 10px;">
@@ -232,6 +266,10 @@
     </header>
 
     <div class="container">
+        <div id="degradedBanner" class="degraded-banner" style="display: none;">
+            ⚠️ <strong>Degraded Mode Active:</strong> LLM API key not provided or request failed. Fallback rule-based extractor and matching engine are active.
+        </div>
+
         <div class="main-layout">
             <!-- Left Column: Document Upload & Management -->
             <div class="panel">
@@ -251,12 +289,13 @@
                 </div>
             </div>
 
-            <!-- Right Column: Facts, Relationships & 4 Cases Showcase -->
+            <!-- Right Column: Facts, Relationships, Rejected & 4 Cases Showcase -->
             <div class="panel">
                 <div class="tabs">
                     <button class="tab-btn active" onclick="switchTab('factsTab')">💡 Grounded Facts</button>
                     <button class="tab-btn" onclick="switchTab('relsTab')">🧩 Cross-Doc Relationships</button>
-                    <button class="tab-btn" onclick="switchTab('casesTab')">📋 Submission Cases (1–4)</button>
+                    <button class="tab-btn" onclick="switchTab('rejectedTab')">⚠️ Rejected Extractions</button>
+                    <button class="tab-btn" onclick="switchTab('casesTab')">📋 Evaluator Cases (1–4)</button>
                 </div>
 
                 <!-- Tab 1: Grounded Facts -->
@@ -273,59 +312,17 @@
                     </div>
                 </div>
 
-                <!-- Tab 3: The 4 Required Cases Showcase -->
+                <!-- Tab 3: Rejected Extractions (Task 8) -->
+                <div id="rejectedTab" style="display: none;">
+                    <div id="rejectedList">
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">No rejected extractions logged.</p>
+                    </div>
+                </div>
+
+                <!-- Tab 4: The 4 Required Submission Cases Showcase -->
                 <div id="casesTab" style="display: none;">
-                    <div class="case-card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span style="font-weight: 700; color: var(--success);">1. Corroborated Fact Across Documents</span>
-                            <span class="badge badge-success">CORROBORATED</span>
-                        </div>
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Claim:</strong> ACME Corp workforce size was 120 employees in 2023.
-                        </p>
-                        <div style="font-size: 0.82rem; color: var(--text-muted);">
-                            <strong>Source A (2023 Report, Page 1):</strong> "The company expanded its workforce to 120 full-time employees."<br>
-                            <strong>Source B (2024 Audit Update, Page 2):</strong> "Company headcount as of December 2023 was confirmed at 120 employees."
-                        </div>
-                    </div>
-
-                    <div class="case-card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span style="font-weight: 700; color: var(--danger);">2. Genuine Contradiction</span>
-                            <span class="badge badge-danger">CONTRADICTION</span>
-                        </div>
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Claim:</strong> Direct conflicting figures reported for the exact same metric and timeframe without explanation.
-                        </p>
-                        <div style="font-size: 0.82rem; color: var(--text-muted);">
-                            Un-reconciled metrics receive a <code>-0.25</code> penalty on confidence score until explicitly explained.
-                        </div>
-                    </div>
-
-                    <div class="case-card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span style="font-weight: 700; color: var(--warning);">3. Reconciled Contradiction by Context</span>
-                            <span class="badge badge-warning">RECONCILED BY CONTEXT</span>
-                        </div>
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Claim:</strong> 2023 Revenue reported as $5.2M in 2023 vs $5.5M in Q1 2024 update.
-                        </p>
-                        <div style="font-size: 0.82rem; color: var(--text-muted);">
-                            <strong>Reconciliation Reasoning:</strong> Apparent contradiction is reconciled by post-period independent audit restatement and revenue recognition adjustments in Q1 2024.
-                        </div>
-                    </div>
-
-                    <div class="case-card">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span style="font-weight: 700; color: #818cf8;">4. Extraction & Reasoning Failure Handling</span>
-                            <span class="badge badge-primary">FAILURE MITIGATION</span>
-                        </div>
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Issue:</strong> Potential LLM hallucination of quotes or text truncation across chunk boundaries.
-                        </p>
-                        <div style="font-size: 0.82rem; color: var(--text-muted);">
-                            <strong>Mitigation:</strong> Verbatim substring grounding check verifies <code>raw_quote in chunk_text</code>. If quote fails matching, <code>grounding_confidence</code> drops to 0%, reducing final score to 0.
-                        </div>
+                    <div id="evaluatorCasesContent">
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">Loading live submission cases from database...</p>
                     </div>
                 </div>
             </div>
@@ -355,6 +352,12 @@
 
                 allRelationships = await fetchJson('/relationships');
                 renderRelationships(allRelationships);
+
+                const rejected = await fetchJson('/rejected-extractions');
+                renderRejected(rejected);
+
+                const cases = await fetchJson('/cases');
+                renderCases(cases);
             } catch (e) {
                 console.error("Error refreshing data:", e);
             }
@@ -366,7 +369,10 @@
             formData.append('file', file);
             try {
                 const data = await fetchJson('/upload', { method: 'POST', body: formData });
-                await fetchJson(`/extract/${data.doc_id}`, { method: 'POST' });
+                const extData = await fetchJson(`/extract/${data.doc_id}`, { method: 'POST' });
+                if (extData.mode === 'degraded') {
+                    document.getElementById('degradedBanner').style.display = 'flex';
+                }
                 refreshData();
             } catch (e) {
                 alert("Upload failed: " + e.message);
@@ -374,7 +380,7 @@
         }
 
         async function deleteDoc(docId) {
-            if (!confirm("Remove this document and its facts?")) return;
+            if (!confirm("Remove this document and all associated facts?")) return;
             try {
                 await fetchJson(`/documents/${docId}`, { method: 'DELETE' });
                 refreshData();
@@ -384,7 +390,7 @@
         }
 
         async function deleteAllDocs() {
-            if (!confirm("Clear all ingested documents and facts?")) return;
+            if (!confirm("Clear all ingested documents, facts, and relationships?")) return;
             try {
                 await fetchJson('/documents', { method: 'DELETE' });
                 refreshData();
@@ -395,7 +401,10 @@
 
         async function extractFactsForDoc(docId) {
             try {
-                await fetchJson(`/extract/${docId}`, { method: 'POST' });
+                const extData = await fetchJson(`/extract/${docId}`, { method: 'POST' });
+                if (extData.mode === 'degraded') {
+                    document.getElementById('degradedBanner').style.display = 'flex';
+                }
                 refreshData();
             } catch (e) {
                 alert("Extraction failed: " + e.message);
@@ -405,7 +414,7 @@
         async function runAnalysis() {
             try {
                 const data = await fetchJson('/analyze', { method: 'POST' });
-                alert(`Analysis Complete!\nFound ${data.relationships_found_count} relationships (${data.corroborations_count} corroborations, ${data.reconciled_count} reconciled, ${data.contradictions_count} contradictions).`);
+                alert(`Analysis Complete!\nEvaluated ${data.candidate_pairs_evaluated} candidate pairs.\nRelationships found: ${data.relationships_found_count}\n- Corroborations: ${data.corroborations_count}\n- Reconciled Context: ${data.reconciled_count}\n- Contradictions: ${data.contradictions_count + data.likely_contradictions_count}\n- Unrelated: ${data.unrelated_count}`);
                 refreshData();
             } catch (e) {
                 alert("Analysis failed: " + e.message);
@@ -440,23 +449,36 @@
                 return;
             }
 
-            container.innerHTML = facts.map(f => `
-                <div class="fact-card">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                        <span class="badge badge-primary">${f.subject}</span>
-                        <span class="badge badge-success">Conf: ${(f.final_confidence * 100).toFixed(0)}%</span>
+            container.innerHTML = facts.map(f => {
+                const finalPct = Math.min(100, Math.max(0, (f.final_confidence * 100))).toFixed(0);
+                return `
+                    <div class="fact-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                            <div>
+                                <span class="badge badge-primary">${f.entity || f.subject}</span>
+                                <span class="badge badge-muted">${f.metric}</span>
+                            </div>
+                            <span class="badge badge-success">Conf: ${finalPct}%</span>
+                        </div>
+                        <div style="font-size: 0.9rem; font-weight: 500; margin-top: 4px;">
+                            <span style="color: var(--text-muted);">${f.predicate}:</span> 
+                            <strong>${f.value}</strong> 
+                            ${f.normalized_value !== null ? `<span style="color: var(--warning); font-size: 0.8rem;">(Norm: ${f.normalized_value} ${f.normalized_unit || ''})</span>` : ''}
+                        </div>
+                        ${f.period ? `<div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">Period: <strong>${f.period}</strong> ${f.scope ? `| Scope: ${f.scope}` : ''}</div>` : ''}
+                        <div class="quote-box">" ${f.raw_quote} "</div>
+                        
+                        <div class="confidence-bar-container">
+                            <div class="confidence-bar-fill" style="width: ${finalPct}%;"></div>
+                        </div>
+
+                        <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">
+                            <span>Doc: ${f.document_id.substring(0, 8)}... | Page ${f.page}</span>
+                            <span>Grounding: ${(f.grounding_confidence * 100).toFixed(0)}%</span>
+                        </div>
                     </div>
-                    <div style="font-size: 0.9rem; font-weight: 500;">
-                        <span style="color: var(--text-muted);">${f.predicate}:</span> ${f.value} ${f.unit ? `<span style="color: var(--warning);">(${f.unit})</span>` : ''}
-                    </div>
-                    ${f.time_scope ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">Scope: ${f.time_scope}</div>` : ''}
-                    <div class="quote-box">" ${f.raw_quote} "</div>
-                    <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">
-                        <span>Page ${f.page}</span>
-                        <span>Grounding: ${(f.grounding_confidence * 100).toFixed(0)}%</span>
-                    </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
         }
 
         function renderRelationships(rels) {
@@ -467,24 +489,30 @@
             }
 
             container.innerHTML = rels.map(r => {
-                let badgeClass = 'badge-primary';
-                if (r.relationship_type === 'corroborates') badgeClass = 'badge-success';
-                else if (r.relationship_type === 'reconciled') badgeClass = 'badge-warning';
-                else if (r.relationship_type === 'contradicts') badgeClass = 'badge-danger';
+                let badgeClass = 'badge-muted';
+                const typeUpper = (r.relationship_type || '').toUpperCase();
+                if (typeUpper === 'CORROBORATES') badgeClass = 'badge-success';
+                else if (typeUpper === 'RECONCILED') badgeClass = 'badge-warning';
+                else if (typeUpper === 'CONTRADICTS' || typeUpper === 'LIKELY_CONTRADICTION') badgeClass = 'badge-danger';
 
                 return `
                     <div class="fact-card">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span class="badge ${badgeClass}">${r.relationship_type.toUpperCase()}</span>
-                            <span style="font-size: 0.78rem; color: var(--text-muted);">Delta: ${r.confidence_delta > 0 ? '+' : ''}${r.confidence_delta}</span>
+                            <div>
+                                <span class="badge ${badgeClass}">${typeUpper}</span>
+                                ${r.reconciliation_type && r.reconciliation_type !== 'NONE' ? `<span class="badge badge-primary">${r.reconciliation_type}</span>` : ''}
+                            </div>
+                            <span style="font-size: 0.78rem; color: var(--text-muted);">Conf Delta: ${r.confidence_delta > 0 ? '+' : ''}${r.confidence}</span>
                         </div>
                         <div class="rel-pair-grid">
                             <div style="background: rgba(0,0,0,0.25); padding: 10px; border-radius: 8px; font-size: 0.82rem;">
                                 <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">Fact A (Page ${r.fact_a ? r.fact_a.page : '?'})</div>
+                                <div style="color: var(--primary); font-weight: 500;">${r.fact_a ? `${r.fact_a.entity} — ${r.fact_a.metric}` : ''}</div>
                                 ${r.fact_a ? r.fact_a.raw_quote : 'Fact #' + r.fact_id_a}
                             </div>
                             <div style="background: rgba(0,0,0,0.25); padding: 10px; border-radius: 8px; font-size: 0.82rem;">
                                 <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">Fact B (Page ${r.fact_b ? r.fact_b.page : '?'})</div>
+                                <div style="color: var(--primary); font-weight: 500;">${r.fact_b ? `${r.fact_b.entity} — ${r.fact_b.metric}` : ''}</div>
                                 ${r.fact_b ? r.fact_b.raw_quote : 'Fact #' + r.fact_id_b}
                             </div>
                         </div>
@@ -496,11 +524,119 @@
             }).join('');
         }
 
+        function renderRejected(rejected) {
+            const container = document.getElementById('rejectedList');
+            if (rejected.length === 0) {
+                container.innerHTML = `<p style="font-size: 0.85rem; color: var(--text-muted);">No rejected extractions logged.</p>`;
+                return;
+            }
+
+            container.innerHTML = rejected.map(rj => `
+                <div class="fact-card" style="border-left: 3px solid var(--danger);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                        <span class="badge badge-danger">${rj.failure_type}</span>
+                        <span style="font-size: 0.78rem; color: var(--text-muted);">Page ${rj.page}</span>
+                    </div>
+                    <div style="font-size: 0.85rem; margin-bottom: 6px;">
+                        <strong>Candidate Text:</strong> <code>${rj.candidate_text}</code>
+                    </div>
+                    <div style="font-size: 0.82rem; color: var(--text-muted); background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px;">
+                        🚫 <strong>Rejection Reason:</strong> ${rj.rejection_reason}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderCases(casesData) {
+            const container = document.getElementById('evaluatorCasesContent');
+            const corr = casesData.corroborated_case;
+            const contra = casesData.likely_contradiction_case;
+            const reconc = casesData.reconciled_case;
+            const fail = casesData.extraction_failure_case;
+
+            container.innerHTML = `
+                <div class="case-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 700; color: var(--success);">Case 1: Corroborated Fact Across Documents</span>
+                        <span class="badge badge-success">CORROBORATES</span>
+                    </div>
+                    ${corr ? `
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Metric:</strong> ${corr.fact_a ? corr.fact_a.metric : 'Corroborating Fact'}
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            <strong>Fact A (Page ${corr.fact_a ? corr.fact_a.page : '?'}):</strong> "${corr.fact_a ? corr.fact_a.raw_quote : ''}"<br>
+                            <strong>Fact B (Page ${corr.fact_b ? corr.fact_b.page : '?'}):</strong> "${corr.fact_b ? corr.fact_b.raw_quote : ''}"<br>
+                            <strong>Reasoning:</strong> ${corr.reasoning}
+                        </div>
+                    ` : `
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">No corroboration detected yet. Please upload both documents and run analysis.</p>
+                    `}
+                </div>
+
+                <div class="case-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 700; color: var(--danger);">Case 2: Genuine Contradiction</span>
+                        <span class="badge badge-danger">CONTRADICTS / LIKELY CONTRADICTION</span>
+                    </div>
+                    ${contra ? `
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Metric:</strong> ${contra.fact_a ? contra.fact_a.metric : 'Contradicting Fact'}
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            <strong>Fact A:</strong> "${contra.fact_a ? contra.fact_a.raw_quote : ''}" (${contra.fact_a ? contra.fact_a.value : ''})<br>
+                            <strong>Fact B:</strong> "${contra.fact_b ? contra.fact_b.raw_quote : ''}" (${contra.fact_b ? contra.fact_b.value : ''})<br>
+                            <strong>Reasoning:</strong> ${contra.reasoning}
+                        </div>
+                    ` : `
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">No contradiction detected in current dataset.</p>
+                    `}
+                </div>
+
+                <div class="case-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 700; color: var(--warning);">Case 3: Reconciled Contradiction by Context</span>
+                        <span class="badge badge-warning">RECONCILED BY CONTEXT</span>
+                    </div>
+                    ${reconc ? `
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Reconciliation Mechanism:</strong> <span class="badge badge-primary">${reconc.reconciliation_type}</span>
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            <strong>Fact A (${reconc.fact_a ? reconc.fact_a.period || 'Period A' : ''}):</strong> "${reconc.fact_a ? reconc.fact_a.raw_quote : ''}"<br>
+                            <strong>Fact B (${reconc.fact_b ? reconc.fact_b.period || 'Period B' : ''}):</strong> "${reconc.fact_b ? reconc.fact_b.raw_quote : ''}"<br>
+                            <strong>Reconciliation Reasoning:</strong> ${reconc.reasoning}
+                        </div>
+                    ` : `
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">No reconciled pair detected yet. Run analysis on multi-period or multi-unit documents.</p>
+                    `}
+                </div>
+
+                <div class="case-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 700; color: #818cf8;">Case 4: Extraction & Reasoning Failure Demonstration</span>
+                        <span class="badge badge-primary">FAILURE CASE</span>
+                    </div>
+                    ${fail ? `
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Failure Type:</strong> <span class="badge badge-danger">${fail.failure_type}</span>
+                        </p>
+                        <div style="font-size: 0.82rem; color: var(--text-muted);">
+                            <strong>Candidate Text:</strong> <code>${fail.candidate_text}</code><br>
+                            <strong>Rejection Reason:</strong> ${fail.rejection_reason}
+                        </div>
+                    ` : `
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">No candidate rejection logged yet.</p>
+                    `}
+                </div>
+            `;
+        }
+
         function switchTab(tabId) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
             event.target.classList.add('active');
 
-            ['factsTab', 'relsTab', 'casesTab'].forEach(t => {
+            ['factsTab', 'relsTab', 'rejectedTab', 'casesTab'].forEach(t => {
                 document.getElementById(t).style.display = (t === tabId) ? 'block' : 'none';
             });
         }

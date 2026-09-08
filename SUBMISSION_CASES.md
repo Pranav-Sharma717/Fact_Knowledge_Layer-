@@ -1,62 +1,114 @@
-# Submission Cases: Fact Knowledge Layer
+# Submission Cases Showcase — Fact Knowledge Layer
 
-This document details the four core cases required for evaluation, demonstrating how the system extracts, grounds, compares, and reconciles facts across unstructured PDF documents.
-
----
-
-## 1. Corroborated Fact Across Documents
-
-- **Claim**: ACME Corp workforce headcount reached 120 employees by December 2023.
-- **Source Document A** (`doc_2023.pdf`, Page 1):
-  - *Verbatim Quote*: `"The company headcount reached 120 employees by December 2023."`
-  - *Extracted Fact*: `{subject: "Workforce headcount", predicate: "reached", value: "120", unit: "employees", time_scope: "December 2023"}`
-- **Source Document B** (`doc_2024.pdf`, Page 1):
-  - *Verbatim Quote*: `"Company headcount as of December 2023 was confirmed at 120 employees."`
-  - *Extracted Fact*: `{subject: "Workforce headcount", predicate: "confirmed at", value: "120", unit: "employees", time_scope: "December 2023"}`
-- **System Reasoning**:
-  - Embedding vector similarity between candidate facts: `0.81` ($> 0.35$ threshold).
-  - LLM Relationship Judge classifies relationship as `CORROBORATES` because both documents state identical employee counts for the exact same timeframe.
-  - **Confidence Impact**: $+0.15$ boost applied to final confidence score.
+This document details the **4 required submission cases** for evaluation on the starter datasets (Delhivery Corporate Filing Excerpts & India Macroeconomy Reports).
 
 ---
 
-## 2. Genuine Contradiction
+## Case 1: Corroborated Fact Across Documents
 
-- **Claim**: Directly conflicting numerical metrics reported for the exact same timeframe without explanation.
-- **Source Document A**:
-  - *Verbatim Quote*: `"Operating expenditure in 2023 totaled $1.2 million."`
-- **Source Document B**:
-  - *Verbatim Quote*: `"Operating expenditure in 2023 totaled $1.9 million."`
-- **System Reasoning**:
-  - Vector similarity pairs candidate facts for analysis.
-  - LLM Relationship Judge classifies relationship as `CONTRADICTS` because values ($1.2M vs $1.9M) conflict for the identical scope without any restatement context.
-  - **Confidence Impact**: $-0.25$ penalty applied to final confidence score.
+### Description
+Both documents assert the exact same metric value, entity, and reporting period. Evidence grounding is verified against source chunks, and final confidence is increased via corroboration.
+
+### Grounded Evidence Case
+- **Entity**: `Delhivery Limited`
+- **Metric**: `Express Parcel Services Volume`
+- **Normalized Value**: `289,200,000 parcels` (`289.20 million`)
+- **Period**: `FY 2023`
+
+#### Source A Evidence
+- **Document**: `02-delhivery-annual-report-fy24-excerpt.pdf`
+- **Page**: `Page 42`
+- **Verbatim Quote**: `"Express parcel volume reached 289.20 million parcels in FY23."`
+- **Grounding Confidence**: `100.0%` (Exact verbatim match)
+
+#### Source B Evidence
+- **Document**: `03-delhivery-q4-fy24-earnings-presentation.pdf`
+- **Page**: `Page 8`
+- **Verbatim Quote**: `"FY23 Express Parcel Volume: 289.20 million."`
+- **Grounding Confidence**: `100.0%` (Exact verbatim match)
+
+### System Classification & Scoring
+- **Relationship Enum**: `CORROBORATES`
+- **Reconciliation Type**: `NONE`
+- **Delta Applied**: `+0.20`
+- **Reasoning**: Both documents corroborate the exact same metric value (289.20 million parcels) for FY 2023.
 
 ---
 
-## 3. Apparent Contradiction Reconciled by Context
+## Case 2: Genuine Contradiction
 
-- **Claim**: Reported 2023 revenue differs between 2023 disclosure ($5.2M) and 2024 update ($5.5M).
-- **Source Document A** (`doc_2023.pdf`, Page 1):
-  - *Verbatim Quote*: `"In FY2023, ACME Corp reported total revenue of $5.2 million."`
-- **Source Document B** (`doc_2024.pdf`, Page 1):
-  - *Verbatim Quote*: `"Following an independent audit in Q1 2024, ACME Corp restated its 2023 revenue to $5.5 million due to revenue recognition adjustments."`
-- **System Reasoning**:
-  - LLM Relationship Judge identifies the apparent numerical discrepancy ($5.2M vs $5.5M) and checks for contextual modifiers.
-  - It detects the contextual clause `"Following an independent audit in Q1 2024 ... restated its 2023 revenue"`.
-  - Classifies relationship as `RECONCILED` (audit restatement context).
-  - **Confidence Impact**: $+0.05$ minor adjustment (reconciled contradiction is noted rather than penalized).
+### Description
+Two documents report conflicting numerical figures or claims for the exact same metric, entity, and time scope, without explicit contextual reconciliation in the source text.
+
+### Grounded Evidence Case
+- **Entity**: `Delhivery Limited`
+- **Metric**: `Restated Revenue from Operations`
+- **Period**: `FY 2022`
+
+#### Source A Evidence
+- **Document**: `01-delhivery-prospectus-2022-excerpt.pdf`
+- **Page**: `Page 18`
+- **Verbatim Quote**: `"Revenue from operations for the financial year 2022 was ₹68,814.93 million."`
+- **Normalized Value**: `₹68,814,930,000.0 INR`
+
+#### Source B Evidence
+- **Document**: `02-delhivery-annual-report-fy24-excerpt.pdf`
+- **Page**: `Page 105`
+- **Verbatim Quote**: `"Revenue from operations for FY22 was reported as ₹72,110.00 million."`
+- **Normalized Value**: `₹72,110,000,000.0 INR`
+
+### System Classification & Scoring
+- **Relationship Enum**: `CONTRADICTS` / `LIKELY_CONTRADICTION`
+- **Percentage Delta**: `4.67%`
+- **Confidence Penalty**: `-0.30`
+- **Reasoning**: Significant direct numerical contradiction (₹68,814.93M vs ₹72,110.00M) for FY 2022 revenue without explicit reconciliation in quote.
 
 ---
 
-## 4. Extraction & Reasoning Failure Handling
+## Case 3: Reconciled Contradiction by Context
 
-- **Failure Mode**:
-  1. **LLM Quote Hallucination**: The LLM summarizes or rewrites text instead of returning a verbatim quote.
-  2. **Boundary Truncation**: A sentence spanning across chunk boundaries gets split, resulting in incomplete quote matching.
-- **System Mitigation**:
-  - **Verbatim Substring Grounding Verification** (`verify_grounding`): The system checks if `raw_quote` exists as an exact or normalized substring inside the source chunk text.
-  - If a quote is hallucinated or absent from the source chunk:
-    - `grounding_confidence` drops to `0.0`.
-    - `final_confidence` $= \text{extraction\_confidence} \times 0.0 = 0.0$.
-  - Low-confidence or ungrounded facts are automatically filtered out, preventing hallucinated claims from polluting the knowledge layer.
+### Description
+An apparent numerical or semantic discrepancy across documents is successfully resolved and reconciled by contextual metadata, such as unit normalization, rounding margins, reporting period differences, or audit restatements.
+
+### Grounded Evidence Case (Unit Normalization & Period Difference)
+- **Entity**: `Delhivery Limited`
+- **Metric**: `Revenue from Operations`
+
+#### Source A Evidence
+- **Document**: `01-delhivery-prospectus-2022-excerpt.pdf`
+- **Page**: `Page 14`
+- **Raw Claim**: `₹36,465.28 million`
+- **Normalized Value**: `₹36,465,280,000.0 INR`
+- **Period**: `FY 2021`
+
+#### Source B Evidence
+- **Document**: `02-delhivery-annual-report-fy24-excerpt.pdf`
+- **Page**: `Page 60`
+- **Raw Claim**: `₹81,415.38 million` (`₹8,141.538 crore`)
+- **Normalized Value**: `₹81,415,380,000.0 INR`
+- **Period**: `FY 2024`
+
+### System Classification & Scoring
+- **Relationship Enum**: `RECONCILED`
+- **Reconciliation Type**: `PERIOD_DIFFERENCE` (and `UNIT_CONVERSION`)
+- **Confidence Delta**: `+0.10`
+- **Reasoning**: Apparent revenue growth discrepancy (₹36,465.28M vs ₹81,415.38M) is reconciled by differing reporting periods (FY 2021 vs FY 2024).
+
+---
+
+## Case 4: Extraction & Reasoning Failure Handling
+
+### Description
+Demonstrates the system's ability to catch, invalidate, and log noisy candidate extractions (table unit headers, context-less numbers, bare unit keywords) into a dedicated ledger rather than propagating invalid facts into downstream relationship matching.
+
+### Logged Failure Case in `rejected_extractions`
+- **Document**: `02-delhivery-annual-report-fy24-excerpt.pdf`
+- **Page**: `Page 101`
+- **Candidate Text**: `"(₹ in million)"`
+- **Attempted Extraction**: `{"entity": "Unknown Entity", "metric": "Table Unit Header", "value": "(₹ in million)"}`
+- **Failure Type**: `TABLE_HEADER_WITHOUT_VALUE`
+- **Rejection Reason**: `"Detected a table-wide unit label or header ('(₹ in million)') without associated entity or metric."`
+
+### Additional System Safeguard
+- **Evidence Grounding Fallback**: If an LLM candidate contains a hallucinated quote not present in source chunk text, `grounding_confidence` evaluates to `0.0`, dropping `final_confidence` to `0.0` and marking status as `rejected`.
+- **Unrelated Metrics Filter**: If two facts share identical values (e.g. `0.00% == 0.00%`) but concern distinct metrics (e.g. `EBITDA Margin` vs `Employee Attrition Rate`), `calculate_comparability_score` evaluates to `0.0`, classifying the pair as `UNRELATED` and preventing false corroborations.
