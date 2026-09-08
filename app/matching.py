@@ -437,7 +437,7 @@ def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: 
     and queries LLM judge with strict fast timeout when ambiguous.
     """
     mock_res = judge_relationship_mock(fact_a, fact_b)
-    if mock_res.get("confidence_delta", 0.0) >= 0.85 and mock_res.get("relationship") != TAXONOMY_UNCERTAIN:
+    if mock_res.get("relationship") != TAXONOMY_UNCERTAIN:
         return mock_res
         
     key = api_key or OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY", "")

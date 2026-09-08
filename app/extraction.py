@@ -228,13 +228,17 @@ def extract_series_alignment_candidates(chunk_text: str, doc_filename: str = "")
         value_line = next((lines[k] for k in range(i + 1, min(len(lines), i + 4))
                            if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)
                            and not re.search(r'\b(?:19|20)\d{2}-\d{2,4}\b', lines[k])
-                           and len(re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', lines[k], re.I)) < 2), None)
+                           and len(re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', lines[k], re.I)) < 2
+                           and len(re.findall(r'\b[a-zA-Z]{3,}\b', lines[k])) <= 2
+                           and not any(w in lines[k].lower() for w in ["tolerance", "(+/-)", "+/-"])), None)
         # MuPDF sometimes emits the period labels after the values in a chart.
         if not value_line:
             value_line = next((lines[k] for k in range(max(0, i - 3), i)
                                if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)
                                and not re.search(r'\b(?:19|20)\d{2}-\d{2,4}\b', lines[k])
-                               and len(re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', lines[k], re.I)) < 2), None)
+                               and len(re.findall(r'\b(FY\s?\d{2,4}|Fiscal\s?\d{2,4}|20\d{2})\b', lines[k], re.I)) < 2
+                               and len(re.findall(r'\b[a-zA-Z]{3,}\b', lines[k])) <= 2
+                               and not any(w in lines[k].lower() for w in ["tolerance", "(+/-)", "+/-"])), None)
         if not metric_line or not value_line:
             continue
         metric_match = next(((name, role) for pattern, name, role in KNOWN_METRIC_PATTERNS
@@ -320,11 +324,12 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                 if is_section_prefix_number(clean_line, num_str.strip(), parsed_num):
                     continue
 
+                num_stripped = num_str.strip()
                 # Skip numbers attached directly to a letter or closing paren (e.g. (GDP)3, inflation14)
-                pos_in_line = line.find(num_str)
+                pos_in_line = line.find(num_stripped)
                 if pos_in_line > 0:
                     char_before = line[pos_in_line - 1]
-                    if char_before in ")abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" and not num_str.startswith(("$", "₹", "INR", "USD", "Rs")):
+                    if char_before in ")abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" and not num_stripped.startswith(("$", "₹", "INR", "USD", "Rs")):
                         continue
 
                 # Check if number is part of a hyphenated year like 2024-25
@@ -333,7 +338,7 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                     if re.search(r'(?:19|20)\d{2}-?$', pre_char):
                         continue
 
-                display_val = num_str.strip()
+                display_val = num_stripped
                 if parsed_num < 0 and not display_val.startswith("-") and not display_val.startswith("("):
                     display_val = f"-{display_val}"
                 elif "(" in display_val and ")" in display_val:
@@ -378,10 +383,18 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                     candidate_metric = metric_name
 
                 # Local context for period and scope
-                pos = pos_in_line if pos_in_line != -1 else line.find(num_str)
+                pos = pos_in_line if pos_in_line != -1 else line.find(num_stripped)
                 before = line[max(0, pos-40):pos]
-                after = line[pos+len(num_str):min(len(line), pos+len(num_str)+50)]
-                local_window = f"{before} {num_str} {after}".lower()
+                after = line[pos+len(num_stripped):min(len(line), pos+len(num_stripped)+50)]
+                local_window = f"{before} {num_stripped} {after}".lower()
+
+                # Skip tolerance band margins: e.g. "4 (+/-) 2 per cent"
+                if re.search(r'(?:\(\s*\+/-\s*\)|\+/-|±)\s*$', before, re.I) or "tolerance band" in before.lower():
+                    continue
+
+                # Skip chart/figure/table references: e.g. "chart IV.2" or "table 2"
+                if re.search(r'\b(?:chart|figure|table|box)\s+[A-Za-z0-9\.]*$', before, re.I):
+                    continue
 
                 unit_match = re.search(r'(million|billion|crore|lakh|crores|lakhs|%|percent|per cent|shares|equity\s+shares|parcels|orders|employees|INR|USD|₹|\$)', num_str, re.IGNORECASE)
                 unit_found = "%" if (unit_match and unit_match.group(1).lower() in {"%", "percent", "per cent"}) else (unit_match.group(1) if unit_match else None)
@@ -403,10 +416,11 @@ def extract_multi_value_line_candidates(line: str, doc_filename: str = "") -> Li
                     if not unit_found or not any(c in unit_found.lower() for c in ["inr", "usd", "₹", "$", "rs", "crore", "million", "billion", "lakh"]):
                         continue
 
+                scope_window = f"{before[-20:]} {num_stripped} {after[:28]}".lower()
                 local_scope = None
-                if re.search(r'april\s*.*?december|apr(?:il)?\s*.*?dec', local_window, re.I):
+                if re.search(r'april\s*.*?december|apr(?:il)?\s*.*?dec', scope_window, re.I):
                     local_scope = "APR_DEC"
-                elif "full year" in local_window or "annual" in local_window:
+                elif "full year" in scope_window or "annual" in scope_window:
                     local_scope = "FULL_YEAR"
 
                 if "previous year" in local_window or "prior year" in local_window:
