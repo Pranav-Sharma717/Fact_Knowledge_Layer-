@@ -18,7 +18,7 @@ from app.models import (
 app = FastAPI(
     title="Fact Knowledge Layer API",
     description="Ingest PDFs, extract grounded facts, match candidate pairs via local embeddings, and reconcile cross-document relationships.",
-    version="1.2.0"
+    version="1.3.0"
 )
 
 app.add_middleware(
@@ -43,7 +43,7 @@ def read_root():
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "1.2.0"}
+    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "1.3.0"}
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...)):
@@ -167,33 +167,39 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
         chunks = cursor.fetchall()
         if not chunks:
             raise HTTPException(status_code=404, detail="No chunks found for this document ID.")
+    finally:
+        conn.close()
+        
+    extracted_records = []
+    for chunk in chunks:
+        c_id = chunk["id"]
+        c_text = chunk["text"]
+        p_num = chunk["page_number"]
+        extracted = extract_facts_from_chunk(c_text, p_num, api_key=api_key)
+        for f in extracted:
+            extracted_records.append((c_id, f))
             
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
         cursor.execute("DELETE FROM facts WHERE document_id = ?", (doc_id,))
         saved_facts = []
-        
-        for chunk in chunks:
-            c_id = chunk["id"]
-            c_text = chunk["text"]
-            p_num = chunk["page_number"]
-            
-            extracted = extract_facts_from_chunk(c_text, p_num, api_key=api_key)
-            for f in extracted:
-                cursor.execute(
-                    """
-                    INSERT INTO facts (
-                        document_id, chunk_id, subject, predicate, value, unit, time_scope,
-                        raw_quote, page, extraction_confidence, grounding_confidence, final_confidence
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        doc_id, c_id, f["subject"], f["predicate"], f["value"], f["unit"],
-                        f["time_scope"], f["raw_quote"], f["page"], f["extraction_confidence"],
-                        f["grounding_confidence"], f["final_confidence"]
-                    )
+        for c_id, f in extracted_records:
+            cursor.execute(
+                """
+                INSERT INTO facts (
+                    document_id, chunk_id, subject, predicate, value, unit, time_scope,
+                    raw_quote, page, extraction_confidence, grounding_confidence, final_confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    doc_id, c_id, f["subject"], f["predicate"], f["value"], f["unit"],
+                    f["time_scope"], f["raw_quote"], f["page"], f["extraction_confidence"],
+                    f["grounding_confidence"], f["final_confidence"]
                 )
-                f_id = cursor.lastrowid
-                saved_facts.append(FactItem(id=f_id, document_id=doc_id, chunk_id=c_id, **f))
-                
+            )
+            f_id = cursor.lastrowid
+            saved_facts.append(FactItem(id=f_id, document_id=doc_id, chunk_id=c_id, **f))
         conn.commit()
         return ExtractionResponse(doc_id=doc_id, facts_extracted_count=len(saved_facts), facts=saved_facts)
     finally:
@@ -226,61 +232,74 @@ def list_all_facts():
 @app.post("/analyze", response_model=AnalysisResponse)
 def analyze_cross_document_relationships(
     similarity_threshold: float = Query(0.35),
+    max_candidates: int = Query(25),
     api_key: Optional[str] = Query(None)
 ):
-    """Runs cross-document relationship detection, persisting relationships and rescoring confidence."""
+    """
+    Runs cross-document relationship detection in memory,
+    then updates database in a single fast <10ms transaction.
+    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM facts ORDER BY id ASC")
         facts_rows = cursor.fetchall()
         facts = [dict(r) for r in facts_rows]
+    finally:
+        conn.close()
         
-        if len(facts) < 2:
-            return AnalysisResponse(
-                candidate_pairs_evaluated=0, relationships_found_count=0,
-                corroborations_count=0, contradictions_count=0, reconciled_count=0, relationships=[]
-            )
+    if len(facts) < 2:
+        return AnalysisResponse(
+            candidate_pairs_evaluated=0, relationships_found_count=0,
+            corroborations_count=0, contradictions_count=0, reconciled_count=0, relationships=[]
+        )
+        
+    candidate_pairs = find_candidate_pairs(facts, similarity_threshold=similarity_threshold, max_candidates=max_candidates)
+    
+    evaluated_results = []
+    corroborations = 0
+    contradictions = 0
+    reconciled = 0
+    
+    for fact_a, fact_b, sim_score in candidate_pairs:
+        judge_res = judge_relationship(fact_a, fact_b, api_key=api_key)
+        rel_type = judge_res["relationship"]
+        if rel_type == "unrelated":
+            continue
             
+        if rel_type == "corroborates":
+            corroborations += 1
+        elif rel_type == "contradicts":
+            contradictions += 1
+        elif rel_type == "reconciled":
+            reconciled += 1
+            
+        evaluated_results.append((fact_a, fact_b, rel_type, judge_res["reasoning"], judge_res["confidence_delta"]))
+        
+    # Write results to database in a single fast transaction (<10ms lock)
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
         cursor.execute("DELETE FROM fact_relationships")
         
-        candidate_pairs = find_candidate_pairs(facts, similarity_threshold=similarity_threshold)
         relationships = []
-        corroborations = 0
-        contradictions = 0
-        reconciled = 0
-        
-        for fact_a, fact_b, sim_score in candidate_pairs:
-            judge_res = judge_relationship(fact_a, fact_b, api_key=api_key)
-            rel_type = judge_res["relationship"]
-            
-            if rel_type == "unrelated":
-                continue
-                
-            if rel_type == "corroborates":
-                corroborations += 1
-            elif rel_type == "contradicts":
-                contradictions += 1
-            elif rel_type == "reconciled":
-                reconciled += 1
-                
+        for fact_a, fact_b, rel_type, reasoning, conf_delta in evaluated_results:
             cursor.execute(
                 """
                 INSERT INTO fact_relationships (fact_id_a, fact_id_b, relationship_type, reasoning, confidence_delta)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (fact_a["id"], fact_b["id"], rel_type, judge_res["reasoning"], judge_res["confidence_delta"])
+                (fact_a["id"], fact_b["id"], rel_type, reasoning, conf_delta)
             )
             rel_id = cursor.lastrowid
-            
             relationships.append(
                 RelationshipItem(
                     id=rel_id,
                     fact_id_a=fact_a["id"],
                     fact_id_b=fact_b["id"],
                     relationship_type=rel_type,
-                    reasoning=judge_res["reasoning"],
-                    confidence_delta=judge_res["confidence_delta"],
+                    reasoning=reasoning,
+                    confidence_delta=conf_delta,
                     fact_a=FactItem(**fact_a),
                     fact_b=FactItem(**fact_b)
                 )

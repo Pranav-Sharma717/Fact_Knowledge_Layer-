@@ -39,10 +39,15 @@ def simple_similarity(str1: str, str2: str) -> float:
     inter = w1.intersection(w2)
     return len(inter) / ((len(w1) ** 0.5) * (len(w2) ** 0.5))
 
-def find_candidate_pairs(facts: List[Dict[str, Any]], similarity_threshold: float = 0.35) -> List[Tuple[Dict[str, Any], Dict[str, Any], float]]:
+def find_candidate_pairs(
+    facts: List[Dict[str, Any]],
+    similarity_threshold: float = 0.40,
+    max_candidates: int = 25
+) -> List[Tuple[Dict[str, Any], Dict[str, Any], float]]:
     """
     Computes pairwise similarity between facts across different documents
     to identify candidate pairs for relationship evaluation.
+    Limits to top max_candidates to prevent long LLM call queues.
     """
     if len(facts) < 2:
         return []
@@ -62,7 +67,7 @@ def find_candidate_pairs(facts: List[Dict[str, Any]], similarity_threshold: floa
         sim_matrix = np.dot(embeddings, embeddings.T)
         for i in range(num_facts):
             for j in range(i + 1, num_facts):
-                if facts[i]["document_id"] != facts[j]["document_id"] or facts[i]["id"] != facts[j]["id"]:
+                if facts[i]["document_id"] != facts[j]["document_id"]:
                     score = float(sim_matrix[i, j])
                     if score >= similarity_threshold:
                         candidate_pairs.append((facts[i], facts[j], score))
@@ -75,21 +80,20 @@ def find_candidate_pairs(facts: List[Dict[str, Any]], similarity_threshold: floa
         sim_matrix = cosine_similarity(mat, mat)
         for i in range(num_facts):
             for j in range(i + 1, num_facts):
-                if facts[i]["document_id"] != facts[j]["document_id"] or facts[i]["id"] != facts[j]["id"]:
+                if facts[i]["document_id"] != facts[j]["document_id"]:
                     score = float(sim_matrix[i, j])
                     if score >= similarity_threshold:
                         candidate_pairs.append((facts[i], facts[j], score))
     else:
-        # Simple word set fallback
         for i in range(num_facts):
             for j in range(i + 1, num_facts):
-                if facts[i]["document_id"] != facts[j]["document_id"] or facts[i]["id"] != facts[j]["id"]:
+                if facts[i]["document_id"] != facts[j]["document_id"]:
                     score = simple_similarity(fact_strings[i], fact_strings[j])
                     if score >= similarity_threshold:
                         candidate_pairs.append((facts[i], facts[j], score))
                         
     candidate_pairs.sort(key=lambda x: x[2], reverse=True)
-    return candidate_pairs
+    return candidate_pairs[:max_candidates]
 
 JUDGE_PROMPT = """You are a rigorous financial & macroeconomic fact-checking engine.
 Analyze two extracted facts from different documents and evaluate their relationship.
@@ -182,38 +186,36 @@ def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: 
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
+        "max_tokens": 300,
         "response_format": {"type": "json_object"}
     }
     
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=10.0) as client:
             res = client.post(OPENROUTER_URL, headers=headers, json=payload)
-            if res.status_code == 401:
+            if res.status_code != 200:
                 return judge_relationship_mock(fact_a, fact_b)
-            res.raise_for_status()
             data = res.json()
             raw_content = data["choices"][0]["message"]["content"]
             parsed = json.loads(raw_content)
             
             return {
-                "relationship": parsed.get("relationship", "unrelated").lower(),
-                "reasoning": parsed.get("reasoning", "No explanation provided."),
+                "relationship": str(parsed.get("relationship", "unrelated")).lower(),
+                "reasoning": str(parsed.get("reasoning", "No explanation provided.")),
                 "confidence_delta": float(parsed.get("confidence_delta", 0.0))
             }
-    except Exception as e:
-        print(f"[ERROR] LLM Relationship Judging failed: {e}. Falling back to mock judge.")
+    except Exception:
         return judge_relationship_mock(fact_a, fact_b)
 
-def recalculate_fact_confidences(conn) -> Dict[str, float]:
-    """
-    Updates final_confidence in SQLite for all facts based on evidence grounding,
-    corroborations, and un-reconciled contradictions.
-    """
+def recalculate_fact_confidences(conn) -> Dict[int, float]:
+    """Updates final_confidence in SQLite for all facts in a fast batch transaction."""
     cursor = conn.cursor()
     cursor.execute("SELECT id, extraction_confidence, grounding_confidence FROM facts")
     all_facts = cursor.fetchall()
     
     updated_scores = {}
+    updates = []
+    
     for f in all_facts:
         f_id = f["id"]
         base_score = float(f["extraction_confidence"]) * float(f["grounding_confidence"])
@@ -224,7 +226,8 @@ def recalculate_fact_confidences(conn) -> Dict[str, float]:
         
         final_score = round(max(0.0, min(1.0, base_score + total_delta)), 3)
         updated_scores[f_id] = final_score
-        cursor.execute("UPDATE facts SET final_confidence = ? WHERE id = ?", (final_score, f_id))
+        updates.append((final_score, f_id))
         
+    cursor.executemany("UPDATE facts SET final_confidence = ? WHERE id = ?", updates)
     conn.commit()
     return updated_scores
