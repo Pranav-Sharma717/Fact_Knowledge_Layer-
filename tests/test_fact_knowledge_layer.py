@@ -78,7 +78,7 @@ def test_comparability_filtering_unrelated_metrics():
         "predicate": "was", "value": "0.00%", "normalized_value": 0.0, "normalized_unit": "%"
     }
     
-    score = calculate_comparability_score(fact_a, fact_b)
+    score, _, _ = calculate_comparability_score(fact_a, fact_b)
     assert score == 0.0
     
     j_res = judge_relationship_mock(fact_a, fact_b)

@@ -1,14 +1,18 @@
 import re
 from typing import Dict, Any, List, Tuple
 
+from app.number_classifier import (
+    detect_navigation_reference, classify_number_role, is_metric_value_role,
+    ROLE_PAGE_REFERENCE, ROLE_YEAR, ROLE_DATE_COMPONENT, ROLE_NOTE_REFERENCE, ROLE_LIST_INDEX
+)
+
 HEADER_PATTERNS = [
-    r'^\(?\s*(?:₹|rs\.?|inr|usd|\$)?\s*(?:in\s+)?(?:million|crore|lakh|billion|thousands?|mn|bn)\s*\)?$',
-    r'^\(?\s*in\s+(?:million|crore|lakh|billion|mn|bn)\s*\)?$',
+    r'^\(?\s*(?:₹|rs\.?|inr|usd|\$)?\s*(?:in\s+)?(?:₹\s+)?(?:million|crore|lakh|billion|thousands?|mn|bn)\s*\)?$',
+    r'^\(?\s*in\s*₹?\s*(?:million|crore|lakh|billion|mn|bn)\s*\)?$',
+    r'^\(?\s*₹?\s*in\s*(?:million|crore|lakh|billion|mn|bn)\s*\)?$',
     r'^particulars$',
     r'^statement\s+of\s+.*$',
     r'^fy\d{2}(?:\s+fy\d{2})+$',
-    r'^\(?\s*₹\s*in\s+million\s*\)?$',
-    r'^\(?\s*rs\.?\s*in\s+million\s*\)?$',
     r'^(?:million|billion|crore|lakh|thousand|\%|₹|\$)$',
     r'^.*book\s+built\s+offer.*$',
     r'^.*exchange\s+board\s+of\s+india.*$',
@@ -67,8 +71,19 @@ def validate_fact_candidate(fact: Dict[str, Any]) -> Dict[str, Any]:
     value = str(fact.get("value") or "").strip()
     quote = str(fact.get("raw_quote") or "").strip()
     num_val = fact.get("numeric_value")
-    
-    # 1. No evidence / quote check
+    unit = str(fact.get("unit") or "").strip()
+    binding_conf = float(fact.get("value_binding_confidence", 1.0))
+
+    # 1. Navigation Reference / Table of Contents Page Reference Check (Task 6 & Task 1)
+    if detect_navigation_reference(quote) or detect_navigation_reference(value):
+        return {
+            "valid": False,
+            "failure_type": "NAVIGATION_REFERENCE",
+            "rejection_reason": f"Table of contents or index page reference line detected ('{quote[:40]}...').",
+            "warnings": ["TOC Page Reference"]
+        }
+
+    # 2. Evidence Quote Presence Check
     if not quote or len(quote) < 4:
         return {
             "valid": False,
@@ -76,26 +91,39 @@ def validate_fact_candidate(fact: Dict[str, Any]) -> Dict[str, Any]:
             "rejection_reason": "Fact lacks valid supporting evidence quote.",
             "warnings": ["Missing raw quote"]
         }
-        
-    # 2. Bare table header / unit label check in value or quote
-    if is_header_or_unit_label(value) or is_header_or_unit_label(quote) or is_header_or_unit_label(metric):
+
+    # 3. Number Role Typing Check (Task 2)
+    if num_val is not None:
+        role, conf = classify_number_role(
+            num_str=f"{num_val:g}", raw_val=value, unit_str=unit, full_line=quote
+        )
+        if not is_metric_value_role(role):
+            return {
+                "valid": False,
+                "failure_type": "INVALID_NUMBER_ROLE",
+                "rejection_reason": f"Number '{value}' represents a {role} rather than a metric value.",
+                "warnings": [f"Number classified as {role}"]
+            }
+
+    # 4. Value Binding Confidence Check (Task 1)
+    if num_val is not None and binding_conf < 0.75:
         return {
             "valid": False,
-            "failure_type": "TABLE_HEADER_WITHOUT_VALUE",
-            "rejection_reason": f"Detected a table header or regulatory title ('{metric or value or quote}') without associated metric quantity.",
-            "warnings": ["Bare table header or unit label"]
-        }
-        
-    # 3. Bare unit in value or metric
-    if value.lower() in UNIT_KEYWORDS or metric.lower() in UNIT_KEYWORDS:
-        return {
-            "valid": False,
-            "failure_type": "TABLE_HEADER_WITHOUT_VALUE",
-            "rejection_reason": f"Metric or value contains only unit keyword '{metric or value}' without metric quantity.",
-            "warnings": ["Unit keyword as metric/value"]
+            "failure_type": "LOW_BINDING_CONFIDENCE",
+            "rejection_reason": f"Metric-value binding confidence ({binding_conf:.2f}) is below threshold 0.75.",
+            "warnings": ["Low value binding confidence"]
         }
 
-    # 4. Generic metric check (General Metric, Table Header, Particulars, etc.)
+    # 5. Bare table header / unit label check
+    if is_header_or_unit_label(value) or is_header_or_unit_label(metric):
+        return {
+            "valid": False,
+            "failure_type": "TABLE_HEADER_WITHOUT_VALUE",
+            "rejection_reason": f"Detected a table header or regulatory title ('{metric or value}') without associated metric quantity.",
+            "warnings": ["Bare table header or unit label"]
+        }
+
+    # 6. Generic metric check (General Metric, Table Header, Particulars, etc.)
     clean_metric = metric.lower().strip()
     if not clean_metric or clean_metric in GENERIC_METRICS or clean_metric in UNIT_KEYWORDS or clean_metric.startswith("#"):
         return {
@@ -105,7 +133,7 @@ def validate_fact_candidate(fact: Dict[str, Any]) -> Dict[str, Any]:
             "warnings": ["Generic or missing metric name"]
         }
 
-    # 5. Non-numeric semantic noise filter
+    # 7. Non-numeric semantic noise filter (Task 8)
     if num_val is None:
         val_clean = value.lower().strip()
         if len(val_clean) < 5 or val_clean in {"through profit or loss", "see note", "n/a", "nil", "none", "refer note"}:
@@ -116,19 +144,7 @@ def validate_fact_candidate(fact: Dict[str, Any]) -> Dict[str, Any]:
                 "warnings": ["Generic non-numeric phrase"]
             }
 
-    # 6. Generic subject and generic predicate without specific metric
-    is_subject_generic = subject.lower() in GENERIC_SUBJECTS or not subject
-    is_pred_generic = predicate.lower() in GENERIC_PREDICATES or not predicate
-    
-    if is_subject_generic and is_pred_generic and clean_metric in GENERIC_METRICS:
-        return {
-            "valid": False,
-            "failure_type": "VALUE_WITHOUT_METRIC",
-            "rejection_reason": "Subject and predicate are generic ('Document Claim / states') and no specific metric could be inferred.",
-            "warnings": ["Generic subject and predicate"]
-        }
-
-    # 7. Low extraction confidence
+    # 8. Extraction confidence check
     conf = float(fact.get("extraction_confidence", 1.0))
     if conf < 0.35:
         return {

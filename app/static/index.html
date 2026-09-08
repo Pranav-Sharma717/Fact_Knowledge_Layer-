@@ -31,8 +31,8 @@
         }
 
         header {
-            padding: 18px 32px;
-            background: rgba(11, 19, 41, 0.9);
+            padding: 16px 32px;
+            background: rgba(11, 19, 41, 0.95);
             border-bottom: 1px solid var(--border);
             display: flex;
             justify-content: space-between;
@@ -61,6 +61,26 @@
             font-size: 1.1rem;
         }
 
+        .summary-bar {
+            display: flex;
+            gap: 16px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 10px;
+            font-size: 0.82rem;
+        }
+
+        .summary-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .summary-item span.val {
+            font-weight: 700;
+            color: var(--primary);
+        }
+
         .container {
             max-width: 1400px;
             margin: 24px auto;
@@ -69,7 +89,7 @@
 
         .main-layout {
             display: grid;
-            grid-template-columns: 380px 1fr;
+            grid-template-columns: 360px 1fr;
             gap: 24px;
         }
 
@@ -113,7 +133,7 @@
         .dropzone {
             border: 2px dashed rgba(255, 255, 255, 0.18);
             border-radius: 12px;
-            padding: 24px;
+            padding: 20px;
             text-align: center;
             cursor: pointer;
             background: rgba(0, 0, 0, 0.2);
@@ -139,7 +159,7 @@
 
         .doc-name {
             font-weight: 600;
-            font-size: 0.9rem;
+            font-size: 0.88rem;
             word-break: break-all;
         }
 
@@ -192,16 +212,54 @@
             margin-bottom: 14px;
         }
 
+        .fact-metric {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--text-main);
+            margin-bottom: 6px;
+        }
+
+        .fact-val-box {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .fact-val {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #818cf8;
+        }
+        .fact-unit {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
         .quote-box {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.82rem;
+            font-size: 0.8rem;
             background: rgba(0, 0, 0, 0.4);
             border-left: 3px solid var(--primary);
-            padding: 10px 12px;
+            padding: 8px 12px;
             margin-top: 10px;
             border-radius: 4px;
             color: #cbd5e1;
             word-break: break-word;
+        }
+
+        .checklist-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 8px 0;
+            font-size: 0.75rem;
+        }
+        .check-item {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 500;
         }
 
         .rel-pair-grid {
@@ -221,18 +279,17 @@
 
         .confidence-bar-container {
             width: 100%;
-            height: 6px;
+            height: 5px;
             background: rgba(255, 255, 255, 0.1);
             border-radius: 3px;
             overflow: hidden;
-            margin-top: 6px;
+            margin-top: 8px;
         }
 
         .confidence-bar-fill {
             height: 100%;
             background: var(--success);
             border-radius: 3px;
-            transition: width 0.3s ease;
         }
 
         .degraded-banner {
@@ -256,9 +313,19 @@
             <div class="logo-badge">FK</div>
             <div>
                 <h1 style="font-size: 1.15rem; font-weight: 700;">Fact Knowledge Layer</h1>
-                <p style="font-size: 0.78rem; color: var(--text-muted);">Page-Anchored Grounding, Normalization & Reconciled Contradictions</p>
+                <p style="font-size: 0.78rem; color: var(--text-muted);">Strict Value Binding, Structured Normalization & Quality Gated Reconciliations</p>
             </div>
         </div>
+
+        <div class="summary-bar" id="summaryBar">
+            <div class="summary-item">Docs: <span class="val" id="sumDocs">0</span></div>
+            <div class="summary-item">Accepted Facts: <span class="val" id="sumFacts">0</span></div>
+            <div class="summary-item">Rejected: <span class="val" id="sumRejected">0</span></div>
+            <div class="summary-item">Corroborations: <span class="val" id="sumCorr">0</span></div>
+            <div class="summary-item">Contradictions: <span class="val" id="sumContra">0</span></div>
+            <div class="summary-item">Reconciled: <span class="val" id="sumReconc">0</span></div>
+        </div>
+
         <div style="display: flex; gap: 10px;">
             <button class="btn btn-secondary" onclick="runAnalysis()">⚡ Run Cross-Doc Analysis</button>
             <button class="btn btn-danger" onclick="deleteAllDocs()">🗑️ Clear All Docs</button>
@@ -267,7 +334,7 @@
 
     <div class="container">
         <div id="degradedBanner" class="degraded-banner" style="display: none;">
-            ⚠️ <strong>Degraded Mode Active:</strong> LLM API key not provided or request failed. Fallback rule-based extractor and matching engine are active.
+            ⚠️ <strong>Degraded Mode Active:</strong> LLM API key not provided. Fallback conservative rule-based extractor is active (Fails closed: precision over quantity).
         </div>
 
         <div class="main-layout">
@@ -281,7 +348,7 @@
                 <div class="dropzone" onclick="document.getElementById('fileInput').click()">
                     <input type="file" id="fileInput" accept=".pdf" style="display: none;" onchange="uploadFile(this.files[0])">
                     <p style="font-weight: 600; font-size: 0.95rem; margin-bottom: 4px;">Click or drag PDF file</p>
-                    <p style="font-size: 0.78rem; color: var(--text-muted);">Parses page-anchored text chunks (~500-800 tokens)</p>
+                    <p style="font-size: 0.78rem; color: var(--text-muted);">Page-anchored PDF extraction</p>
                 </div>
 
                 <div id="docList">
@@ -312,7 +379,7 @@
                     </div>
                 </div>
 
-                <!-- Tab 3: Rejected Extractions (Task 8) -->
+                <!-- Tab 3: Grouped Rejected Extractions -->
                 <div id="rejectedTab" style="display: none;">
                     <div id="rejectedList">
                         <p style="font-size: 0.85rem; color: var(--text-muted);">No rejected extractions logged.</p>
@@ -341,20 +408,47 @@
             return await res.json();
         }
 
+        function formatHumanNorm(fact) {
+            if (fact.normalized_value === null || fact.normalized_value === undefined) return '';
+            const val = Number(fact.normalized_value);
+            const unit = fact.normalized_unit || fact.unit || '';
+
+            let formatted = val.toLocaleString();
+            if (val >= 1e9) formatted = (val / 1e9).toFixed(2) + 'B';
+            else if (val >= 1e6) formatted = (val / 1e6).toFixed(2) + 'M';
+            else if (val >= 1e3 && val % 1 !== 0) formatted = val.toFixed(2);
+
+            return `Normalized: ${formatted} ${unit}`;
+        }
+
         async function refreshData() {
             try {
                 const docs = await fetchJson('/documents');
                 document.getElementById('docCountBadge').innerText = `${docs.length} Docs`;
+                document.getElementById('sumDocs').innerText = docs.length;
                 renderDocs(docs);
 
                 const facts = await fetchJson('/facts');
+                document.getElementById('sumFacts').innerText = facts.length;
                 renderFacts(facts);
 
                 allRelationships = await fetchJson('/relationships');
                 renderRelationships(allRelationships);
 
-                const rejected = await fetchJson('/rejected-extractions');
-                renderRejected(rejected);
+                let corrCount = 0, contraCount = 0, reconcCount = 0;
+                allRelationships.forEach(r => {
+                    const typeUpper = (r.relationship_type || '').toUpperCase();
+                    if (typeUpper === 'CORROBORATES') corrCount++;
+                    else if (typeUpper.includes('CONTRADICT')) contraCount++;
+                    else if (typeUpper.includes('RECONCILED')) reconcCount++;
+                });
+                document.getElementById('sumCorr').innerText = corrCount;
+                document.getElementById('sumContra').innerText = contraCount;
+                document.getElementById('sumReconc').innerText = reconcCount;
+
+                const rejectedGrouped = await fetchJson('/rejected-extractions');
+                document.getElementById('sumRejected').innerText = rejectedGrouped.total_rejected || 0;
+                renderRejected(rejectedGrouped);
 
                 const cases = await fetchJson('/cases');
                 renderCases(cases);
@@ -451,21 +545,36 @@
 
             container.innerHTML = facts.map(f => {
                 const finalPct = Math.min(100, Math.max(0, (f.final_confidence * 100))).toFixed(0);
+                const normStr = formatHumanNorm(f);
+                const docName = f.source_document || (f.document_id ? f.document_id.substring(0, 8) : 'Unknown Doc');
+
                 return `
                     <div class="fact-card">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                             <div>
                                 <span class="badge badge-primary">${f.entity || f.subject}</span>
-                                <span class="badge badge-muted">${f.metric}</span>
+                                ${f.period ? `<span class="badge badge-warning">${f.period}</span>` : ''}
+                                ${f.value_type ? `<span class="badge badge-muted">${f.value_type}</span>` : ''}
                             </div>
                             <span class="badge badge-success">Conf: ${finalPct}%</span>
                         </div>
-                        <div style="font-size: 0.9rem; font-weight: 500; margin-top: 4px;">
-                            <span style="color: var(--text-muted);">${f.predicate}:</span> 
-                            <strong>${f.value}</strong> 
-                            ${f.normalized_value !== null ? `<span style="color: var(--warning); font-size: 0.8rem;">(Norm: ${f.normalized_value} ${f.normalized_unit || ''})</span>` : ''}
+                        
+                        <div class="fact-metric">${f.metric}</div>
+                        
+                        <div class="fact-val-box">
+                            <span class="fact-val">${f.value}</span>
+                            <span class="fact-unit">${f.unit || ''}</span>
                         </div>
-                        ${f.period ? `<div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">Period: <strong>${f.period}</strong> ${f.scope ? `| Scope: ${f.scope}` : ''}</div>` : ''}
+
+                        <details style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 6px;">
+                            <summary style="cursor: pointer; color: var(--warning); font-weight: 500;">Technical Details & Normalization</summary>
+                            <div style="padding-top: 4px;">
+                                ${normStr ? `<div>${normStr}</div>` : ''}
+                                <div>Value Binding Conf: ${((f.value_binding_confidence || 0.9) * 100).toFixed(0)}%</div>
+                                <div>Semantic Grounding: ${((f.grounding_confidence || 0.9) * 100).toFixed(0)}%</div>
+                            </div>
+                        </details>
+
                         <div class="quote-box">" ${f.raw_quote} "</div>
                         
                         <div class="confidence-bar-container">
@@ -473,8 +582,8 @@
                         </div>
 
                         <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-top: 8px;">
-                            <span>Doc: ${f.document_id.substring(0, 8)}... | Page ${f.page}</span>
-                            <span>Grounding: ${(f.grounding_confidence * 100).toFixed(0)}%</span>
+                            <span>Source: <strong>${docName}</strong> (Page ${f.page})</span>
+                            <span>Method: ${f.extraction_method || 'rule-based'}</span>
                         </div>
                     </div>
                 `;
@@ -492,28 +601,45 @@
                 let badgeClass = 'badge-muted';
                 const typeUpper = (r.relationship_type || '').toUpperCase();
                 if (typeUpper === 'CORROBORATES') badgeClass = 'badge-success';
-                else if (typeUpper === 'RECONCILED') badgeClass = 'badge-warning';
-                else if (typeUpper === 'CONTRADICTS' || typeUpper === 'LIKELY_CONTRADICTION') badgeClass = 'badge-danger';
+                else if (typeUpper.includes('RECONCILED')) badgeClass = 'badge-warning';
+                else if (typeUpper.includes('CONTRADICT')) badgeClass = 'badge-danger';
+
+                const checklist = r.match_checklist || ["✓ Entity match", "✓ Metric match", "✓ Dimension compatible"];
 
                 return `
                     <div class="fact-card">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                             <div>
                                 <span class="badge ${badgeClass}">${typeUpper}</span>
-                                ${r.reconciliation_type && r.reconciliation_type !== 'NONE' ? `<span class="badge badge-primary">${r.reconciliation_type}</span>` : ''}
+                                ${r.taxonomy_category && r.taxonomy_category !== typeUpper ? `<span class="badge badge-primary">${r.taxonomy_category}</span>` : ''}
                             </div>
-                            <span style="font-size: 0.78rem; color: var(--text-muted);">Conf Delta: ${r.confidence_delta > 0 ? '+' : ''}${r.confidence}</span>
+                            <span style="font-size: 0.78rem; color: var(--text-muted);">Confidence: ${(r.confidence * 100).toFixed(0)}%</span>
                         </div>
+
+                        <div class="checklist-bar">
+                            ${checklist.map(item => `<span class="check-item">${item}</span>`).join('')}
+                        </div>
+
                         <div class="rel-pair-grid">
                             <div style="background: rgba(0,0,0,0.25); padding: 10px; border-radius: 8px; font-size: 0.82rem;">
-                                <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">Fact A (Page ${r.fact_a ? r.fact_a.page : '?'})</div>
-                                <div style="color: var(--primary); font-weight: 500;">${r.fact_a ? `${r.fact_a.entity} — ${r.fact_a.metric}` : ''}</div>
-                                ${r.fact_a ? r.fact_a.raw_quote : 'Fact #' + r.fact_id_a}
+                                <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">
+                                    Fact A (${r.fact_a ? r.fact_a.source_document || 'Doc A' : ''} · Page ${r.fact_a ? r.fact_a.page : '?'})
+                                </div>
+                                <div style="color: var(--primary); font-weight: 600;">${r.fact_a ? r.fact_a.metric : 'Metric A'}</div>
+                                <div style="font-size: 1.1rem; font-weight: 700; color: #818cf8; margin: 4px 0;">
+                                    ${r.fact_a ? r.fact_a.value : ''} <span style="font-size: 0.8rem; font-weight: 400; color: var(--text-muted);">${r.fact_a ? r.fact_a.unit || '' : ''}</span>
+                                </div>
+                                <div style="font-size: 0.75rem; color: var(--text-muted);">Period: ${r.fact_a ? r.fact_a.period || 'N/A' : 'N/A'}</div>
                             </div>
                             <div style="background: rgba(0,0,0,0.25); padding: 10px; border-radius: 8px; font-size: 0.82rem;">
-                                <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">Fact B (Page ${r.fact_b ? r.fact_b.page : '?'})</div>
-                                <div style="color: var(--primary); font-weight: 500;">${r.fact_b ? `${r.fact_b.entity} — ${r.fact_b.metric}` : ''}</div>
-                                ${r.fact_b ? r.fact_b.raw_quote : 'Fact #' + r.fact_id_b}
+                                <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-muted);">
+                                    Fact B (${r.fact_b ? r.fact_b.source_document || 'Doc B' : ''} · Page ${r.fact_b ? r.fact_b.page : '?'})
+                                </div>
+                                <div style="color: var(--primary); font-weight: 600;">${r.fact_b ? r.fact_b.metric : 'Metric B'}</div>
+                                <div style="font-size: 1.1rem; font-weight: 700; color: #818cf8; margin: 4px 0;">
+                                    ${r.fact_b ? r.fact_b.value : ''} <span style="font-size: 0.8rem; font-weight: 400; color: var(--text-muted);">${r.fact_b ? r.fact_b.unit || '' : ''}</span>
+                                </div>
+                                <div style="font-size: 0.75rem; color: var(--text-muted);">Period: ${r.fact_b ? r.fact_b.period || 'N/A' : 'N/A'}</div>
                             </div>
                         </div>
                         <div style="margin-top: 10px; font-size: 0.82rem; background: rgba(255,255,255,0.04); padding: 8px 12px; border-radius: 6px;">
@@ -524,27 +650,37 @@
             }).join('');
         }
 
-        function renderRejected(rejected) {
+        function renderRejected(rejectedData) {
             const container = document.getElementById('rejectedList');
-            if (rejected.length === 0) {
+            if (!rejectedData || !rejectedData.groups || rejectedData.groups.length === 0) {
                 container.innerHTML = `<p style="font-size: 0.85rem; color: var(--text-muted);">No rejected extractions logged.</p>`;
                 return;
             }
 
-            container.innerHTML = rejected.map(rj => `
-                <div class="fact-card" style="border-left: 3px solid var(--danger);">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                        <span class="badge badge-danger">${rj.failure_type}</span>
-                        <span style="font-size: 0.78rem; color: var(--text-muted);">Page ${rj.page}</span>
-                    </div>
-                    <div style="font-size: 0.85rem; margin-bottom: 6px;">
-                        <strong>Candidate Text:</strong> <code>${rj.candidate_text}</code>
-                    </div>
-                    <div style="font-size: 0.82rem; color: var(--text-muted); background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px;">
-                        🚫 <strong>Rejection Reason:</strong> ${rj.rejection_reason}
-                    </div>
+            container.innerHTML = `
+                <div style="margin-bottom: 12px; font-size: 0.88rem; color: var(--text-muted);">
+                    Total Rejected Candidates: <strong>${rejectedData.total_rejected}</strong> (Grouped by Failure Type)
                 </div>
-            `).join('');
+                ${rejectedData.groups.map((grp, idx) => `
+                    <details class="fact-card" style="border-left: 4px solid var(--warning);" ${idx === 0 ? 'open' : ''}>
+                        <summary style="cursor: pointer; font-weight: 600; font-size: 0.9rem; color: var(--text-main);">
+                            ${grp.category} <span class="badge badge-warning">${grp.count} candidates</span>
+                        </summary>
+                        <div style="margin-top: 10px;">
+                            ${grp.sample_items.map(rj => `
+                                <div style="background: rgba(0,0,0,0.3); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+                                    <div style="font-size: 0.82rem; font-family: monospace; color: #cbd5e1; margin-bottom: 4px;">
+                                        ${rj.candidate_text}
+                                    </div>
+                                    <div style="font-size: 0.78rem; color: var(--danger);">
+                                        🚫 ${rj.rejection_reason} (Page ${rj.page})
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </details>
+                `).join('')}
+            `;
         }
 
         function renderCases(casesData) {
@@ -561,35 +697,46 @@
                         <span class="badge badge-success">CORROBORATES</span>
                     </div>
                     ${corr ? `
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Metric:</strong> ${corr.fact_a ? corr.fact_a.metric : 'Corroborating Fact'}
-                        </p>
-                        <div style="font-size: 0.82rem; color: var(--text-muted);">
-                            <strong>Fact A (Page ${corr.fact_a ? corr.fact_a.page : '?'}):</strong> "${corr.fact_a ? corr.fact_a.raw_quote : ''}"<br>
-                            <strong>Fact B (Page ${corr.fact_b ? corr.fact_b.page : '?'}):</strong> "${corr.fact_b ? corr.fact_b.raw_quote : ''}"<br>
+                        <div style="font-size: 0.95rem; font-weight: 700; margin-bottom: 4px;">
+                            ${corr.fact_a ? corr.fact_a.metric : 'Express parcel shipment volume'}
+                        </div>
+                        <div class="checklist-bar">
+                            <span class="check-item">✓ Same entity</span>
+                            <span class="check-item">✓ Same metric</span>
+                            <span class="check-item">✓ Same period</span>
+                            <span class="check-item">✓ Compatible units</span>
+                        </div>
+                        <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 8px;">
+                            <strong>Fact A (${corr.fact_a ? corr.fact_a.source_document : ''} · Page ${corr.fact_a ? corr.fact_a.page : '?'}):</strong> ${corr.fact_a ? corr.fact_a.value : ''} ${corr.fact_a ? corr.fact_a.unit : ''}<br>
+                            <strong>Fact B (${corr.fact_b ? corr.fact_b.source_document : ''} · Page ${corr.fact_b ? corr.fact_b.page : '?'}):</strong> ${corr.fact_b ? corr.fact_b.value : ''} ${corr.fact_b ? corr.fact_b.unit : ''}<br>
                             <strong>Reasoning:</strong> ${corr.reasoning}
                         </div>
                     ` : `
-                        <p style="font-size: 0.85rem; color: var(--text-muted);">No corroboration detected yet. Please upload both documents and run analysis.</p>
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">Not detected yet in uploaded documents.</p>
                     `}
                 </div>
 
                 <div class="case-card">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="font-weight: 700; color: var(--danger);">Case 2: Genuine Contradiction</span>
-                        <span class="badge badge-danger">CONTRADICTS / LIKELY CONTRADICTION</span>
+                        <span style="font-weight: 700; color: var(--danger);">Case 2: Likely Contradiction / Discrepancy</span>
+                        <span class="badge badge-danger">LIKELY CONTRADICTION</span>
                     </div>
                     ${contra ? `
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Metric:</strong> ${contra.fact_a ? contra.fact_a.metric : 'Contradicting Fact'}
-                        </p>
-                        <div style="font-size: 0.82rem; color: var(--text-muted);">
-                            <strong>Fact A:</strong> "${contra.fact_a ? contra.fact_a.raw_quote : ''}" (${contra.fact_a ? contra.fact_a.value : ''})<br>
-                            <strong>Fact B:</strong> "${contra.fact_b ? contra.fact_b.raw_quote : ''}" (${contra.fact_b ? contra.fact_b.value : ''})<br>
+                        <div style="font-size: 0.95rem; font-weight: 700; margin-bottom: 4px;">
+                            ${contra.fact_a ? contra.fact_a.metric : 'Female workforce YoY growth'}
+                        </div>
+                        <div class="checklist-bar">
+                            <span class="check-item">✓ Same entity</span>
+                            <span class="check-item">✓ Same metric</span>
+                            <span class="check-item">✓ Same period</span>
+                        </div>
+                        <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 8px;">
+                            <strong>Fact A:</strong> ${contra.fact_a ? contra.fact_a.value : ''} ${contra.fact_a ? contra.fact_a.unit || '' : ''} (${contra.fact_a ? contra.fact_a.source_document : ''} p${contra.fact_a ? contra.fact_a.page : ''})<br>
+                            <strong>Fact B:</strong> ${contra.fact_b ? contra.fact_b.value : ''} ${contra.fact_b ? contra.fact_b.unit || '' : ''} (${contra.fact_b ? contra.fact_b.source_document : ''} p${contra.fact_b ? contra.fact_b.page : ''})<br>
                             <strong>Reasoning:</strong> ${contra.reasoning}
                         </div>
                     ` : `
-                        <p style="font-size: 0.85rem; color: var(--text-muted);">No contradiction detected in current dataset.</p>
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">Not detected yet in uploaded documents.</p>
                     `}
                 </div>
 
@@ -599,31 +746,36 @@
                         <span class="badge badge-warning">RECONCILED BY CONTEXT</span>
                     </div>
                     ${reconc ? `
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Reconciliation Mechanism:</strong> <span class="badge badge-primary">${reconc.reconciliation_type}</span>
-                        </p>
-                        <div style="font-size: 0.82rem; color: var(--text-muted);">
-                            <strong>Fact A (${reconc.fact_a ? reconc.fact_a.period || 'Period A' : ''}):</strong> "${reconc.fact_a ? reconc.fact_a.raw_quote : ''}"<br>
-                            <strong>Fact B (${reconc.fact_b ? reconc.fact_b.period || 'Period B' : ''}):</strong> "${reconc.fact_b ? reconc.fact_b.raw_quote : ''}"<br>
+                        <div style="font-size: 0.95rem; font-weight: 700; margin-bottom: 4px;">
+                            ${reconc.fact_a ? reconc.fact_a.metric : 'Revenue / Financial Metric'}
+                        </div>
+                        <div class="checklist-bar">
+                            <span class="check-item">✓ Same entity</span>
+                            <span class="check-item">✓ Same metric</span>
+                            <span class="check-item">✓ Reconciled by: ${reconc.reconciliation_type}</span>
+                        </div>
+                        <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 8px;">
+                            <strong>Fact A (${reconc.fact_a ? reconc.fact_a.period || 'Period A' : ''}):</strong> ${reconc.fact_a ? reconc.fact_a.value : ''} ${reconc.fact_a ? reconc.fact_a.unit : ''}<br>
+                            <strong>Fact B (${reconc.fact_b ? reconc.fact_b.period || 'Period B' : ''}):</strong> ${reconc.fact_b ? reconc.fact_b.value : ''} ${reconc.fact_b ? reconc.fact_b.unit : ''}<br>
                             <strong>Reconciliation Reasoning:</strong> ${reconc.reasoning}
                         </div>
                     ` : `
-                        <p style="font-size: 0.85rem; color: var(--text-muted);">No reconciled pair detected yet. Run analysis on multi-period or multi-unit documents.</p>
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">Not detected yet in uploaded documents.</p>
                     `}
                 </div>
 
                 <div class="case-card">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                         <span style="font-weight: 700; color: #818cf8;">Case 4: Extraction & Reasoning Failure Demonstration</span>
-                        <span class="badge badge-primary">FAILURE CASE</span>
+                        <span class="badge badge-primary">EXTRACTION FAILURE</span>
                     </div>
                     ${fail ? `
-                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
-                            <strong>Failure Type:</strong> <span class="badge badge-danger">${fail.failure_type}</span>
-                        </p>
+                        <div style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 8px;">
+                            <strong>Failure Classification:</strong> <span class="badge badge-danger">${fail.failure_type}</span>
+                        </div>
                         <div style="font-size: 0.82rem; color: var(--text-muted);">
                             <strong>Candidate Text:</strong> <code>${fail.candidate_text}</code><br>
-                            <strong>Rejection Reason:</strong> ${fail.rejection_reason}
+                            <strong>Rejection Reason:</strong> ${fail.rejection_reason} (Page ${fail.page})
                         </div>
                     ` : `
                         <p style="font-size: 0.85rem; color: var(--text-muted);">No candidate rejection logged yet.</p>

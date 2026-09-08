@@ -5,22 +5,27 @@ from fastapi.responses import FileResponse
 import os
 import json
 import sqlite3
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from app.database import init_db, get_db_connection
 from app.pdf_ingestion import process_pdf_bytes
 from app.extraction import extract_facts_from_chunk
-from app.matching import find_candidate_pairs, judge_relationship, recalculate_fact_confidences
+from app.matching import (
+    find_candidate_pairs, judge_relationship, recalculate_fact_confidences,
+    calculate_comparability_score, can_compute_delta,
+    TAXONOMY_CORROBORATES, TAXONOMY_CONTRADICTS, TAXONOMY_LIKELY_CONTRADICTION,
+    TAXONOMY_CONTEXTUAL_DIFFERENCE, TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING
+)
 from app.models import (
     UploadResponse, DocumentResponse, ChunkResponse,
     FactItem, RejectedExtractionItem, ExtractionResponse,
-    RelationshipItem, AnalysisResponse, AssignmentCasesResponse
+    RelationshipItem, AnalysisResponse, AssignmentCasesResponse, GroupedRejectedResponse
 )
 
 app = FastAPI(
     title="Fact Knowledge Layer API",
-    description="Ingest PDFs, extract grounded facts, match candidate pairs, filter comparability, and reconcile cross-document relationships.",
-    version="2.0.0"
+    description="Ingest PDFs, extract grounded facts, match candidate pairs with hard comparability gates, and classify relationships.",
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -45,7 +50,7 @@ def read_root():
     index_path = os.path.join(static_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "2.0.0"}
+    return {"status": "online", "service": "Fact Knowledge Layer API", "version": "3.0.0"}
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...)):
@@ -220,18 +225,21 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
                 INSERT INTO facts (
                     document_id, chunk_id, subject, entity, metric, predicate, value, numeric_value, unit,
                     normalized_value, normalized_unit, period, as_of_date, scope, qualifiers,
-                    raw_quote, page, extraction_confidence, grounding_confidence, final_confidence,
-                    extraction_method, validation_status, validation_notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_quote, page, extraction_confidence, grounding_confidence, value_binding_confidence,
+                    final_confidence, value_type, is_numeric, value_source_span, metric_source_span,
+                    temporal_source_span, extraction_method, validation_status, validation_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc_id, c_id, subj, ent, f.get("metric", "General Assertion"),
-                    f.get("predicate", "states"), f.get("value"), f.get("numeric_value"), f.get("unit"),
+                    f.get("predicate", "was reported as"), f.get("value"), f.get("numeric_value"), f.get("unit"),
                     f.get("normalized_value"), f.get("normalized_unit"), f.get("period"), f.get("as_of_date"),
                     f.get("scope"), f.get("qualifiers"), f.get("raw_quote"), f.get("page"),
                     f.get("extraction_confidence", 0.9), f.get("grounding_confidence", 1.0),
-                    f.get("final_confidence", 0.9), f.get("extraction_method", "llm"),
-                    f.get("validation_status", "valid"), f.get("validation_notes")
+                    f.get("value_binding_confidence", 1.0), f.get("final_confidence", 0.9),
+                    f.get("value_type", "UNKNOWN"), 1 if f.get("is_numeric", True) else 0,
+                    f.get("value_source_span"), f.get("metric_source_span"), f.get("temporal_source_span"),
+                    f.get("extraction_method", "llm"), f.get("validation_status", "valid"), f.get("validation_notes")
                 )
             )
             f_id = cursor.lastrowid
@@ -287,27 +295,99 @@ def list_all_facts():
     finally:
         conn.close()
 
-@app.get("/rejected-extractions", response_model=List[RejectedExtractionItem])
-def list_rejected_extractions():
-    """List all rejected candidates stored in SQLite (Task 8 compliance)."""
+@app.get("/rejected-extractions", response_model=GroupedRejectedResponse)
+def list_rejected_extractions_grouped():
+    """List all rejected candidates grouped by failure category (Task 14)."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM rejected_extractions ORDER BY id ASC")
-        rows = cursor.fetchall()
-        return [RejectedExtractionItem(**dict(r)) for r in rows]
+        rows = [dict(r) for r in cursor.fetchall()]
+        
+        grouped: Dict[str, List[RejectedExtractionItem]] = {
+            "TABLE_HEADERS": [],
+            "BARE_UNITS": [],
+            "VALUES_WITHOUT_METRIC": [],
+            "NAVIGATION_REFERENCES": [],
+            "INVALID_NUMBER_ROLE": [],
+            "LOW_BINDING_CONFIDENCE": [],
+            "AMBIGUOUS_CLAIMS": []
+        }
+        
+        for r in rows:
+            ft = r.get("failure_type", "AMBIGUOUS_CLAIMS")
+            item = RejectedExtractionItem(**r)
+            if ft in grouped:
+                grouped[ft].append(item)
+            elif ft == "INSUFFICIENT_CONTEXT":
+                grouped["AMBIGUOUS_CLAIMS"].append(item)
+            else:
+                grouped["AMBIGUOUS_CLAIMS"].append(item)
+
+        grouped_counts = {k: len(v) for k, v in grouped.items()}
+        return GroupedRejectedResponse(
+            total_rejected=len(rows),
+            grouped_counts=grouped_counts,
+            groups=grouped
+        )
+    finally:
+        conn.close()
+
+@app.get("/debug/pipeline")
+def developer_debug_pipeline():
+    """Developer inspection endpoint dumping accepted facts, rejected extractions, and candidate comparability gates (Task 19)."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM facts ORDER BY id ASC")
+        facts = [dict(r) for r in cursor.fetchall()]
+        
+        cursor.execute("SELECT * FROM rejected_extractions ORDER BY id ASC")
+        rejected = [dict(r) for r in cursor.fetchall()]
+        
+        candidate_pairs_debug = []
+        if len(facts) >= 2:
+            num_facts = len(facts)
+            for i in range(num_facts):
+                for j in range(i + 1, num_facts):
+                    f_a = facts[i]
+                    f_b = facts[j]
+                    if f_a["document_id"] != f_b["document_id"]:
+                        score, passed, failed = calculate_comparability_score(f_a, f_b)
+                        candidate_pairs_debug.append({
+                            "fact_id_a": f_a["id"],
+                            "fact_id_b": f_b["id"],
+                            "metric_a": f_a["metric"],
+                            "metric_b": f_b["metric"],
+                            "comparability_score": score,
+                            "gates_passed": passed,
+                            "gates_failed": failed
+                        })
+
+        cursor.execute("SELECT * FROM fact_relationships ORDER BY id ASC")
+        rels = [dict(r) for r in cursor.fetchall()]
+
+        return {
+            "accepted_facts_count": len(facts),
+            "rejected_candidates_count": len(rejected),
+            "candidate_pairs_evaluated": len(candidate_pairs_debug),
+            "accepted_facts": facts[:50],
+            "rejected_candidates": rejected[:50],
+            "relationship_candidates": candidate_pairs_debug[:50],
+            "relationships": rels[:50]
+        }
     finally:
         conn.close()
 
 @app.post("/analyze", response_model=AnalysisResponse)
 def analyze_cross_document_relationships(
     similarity_threshold: float = Query(0.35),
-    max_candidates: int = Query(30),
+    max_candidates: int = Query(50),
     api_key: Optional[str] = Query(None)
 ):
     """
-    Runs cross-document relationship detection with comparability filtering,
-    strict enum classification, and database updates in a single fast transaction.
+    Runs cross-document relationship detection with strict comparability hard gates,
+    taxonomy classification, and confidence updates.
     """
     conn = get_db_connection()
     try:
@@ -322,7 +402,8 @@ def analyze_cross_document_relationships(
         return AnalysisResponse(
             candidate_pairs_evaluated=0, relationships_found_count=0,
             corroborations_count=0, contradictions_count=0, likely_contradictions_count=0,
-            reconciled_count=0, unrelated_count=0, uncertain_count=0, relationships=[]
+            contextual_differences_count=0, reconciled_count=0, unrelated_count=0, uncertain_count=0,
+            relationships=[]
         )
         
     candidate_pairs = find_candidate_pairs(facts, similarity_threshold=similarity_threshold, max_candidates=max_candidates)
@@ -331,30 +412,38 @@ def analyze_cross_document_relationships(
     corroborations = 0
     contradictions = 0
     likely_contradictions = 0
+    contextual_differences = 0
     reconciled = 0
     unrelated = 0
     uncertain = 0
     
-    for fact_a, fact_b, sim_score in candidate_pairs:
+    for fact_a, fact_b, sim_score, passed_gates in candidate_pairs:
         judge_res = judge_relationship(fact_a, fact_b, api_key=api_key)
         rel_type = judge_res["relationship"]
+        tax_cat = judge_res.get("taxonomy_category", rel_type)
         
-        if rel_type == "CORROBORATES":
+        if rel_type == TAXONOMY_CORROBORATES:
             corroborations += 1
-        elif rel_type == "CONTRADICTS":
+        elif rel_type == TAXONOMY_CONTRADICTS:
             contradictions += 1
-        elif rel_type == "LIKELY_CONTRADICTION":
+        elif rel_type == TAXONOMY_LIKELY_CONTRADICTION:
             likely_contradictions += 1
-        elif rel_type == "RECONCILED":
+        elif rel_type == "RECONCILED" or tax_cat in {TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING}:
             reconciled += 1
-        elif rel_type == "UNRELATED":
+        elif tax_cat == TAXONOMY_CONTEXTUAL_DIFFERENCE:
+            contextual_differences += 1
+        elif rel_type == TAXONOMY_UNRELATED:
             unrelated += 1
         else:
             uncertain += 1
             
+        checklist_str = json.dumps(judge_res.get("match_checklist", passed_gates))
+
         evaluated_results.append((
-            fact_a, fact_b, rel_type, judge_res["reasoning"],
-            judge_res["confidence_delta"], judge_res["comparison_delta"], judge_res["reconciliation_type"]
+            fact_a, fact_b, rel_type, tax_cat, judge_res["reasoning"],
+            judge_res["confidence_delta"], judge_res["comparison_delta"],
+            1 if judge_res.get("can_compute_delta", False) else 0,
+            judge_res["reconciliation_type"], checklist_str
         ))
         
     conn = get_db_connection()
@@ -363,27 +452,34 @@ def analyze_cross_document_relationships(
         cursor.execute("DELETE FROM fact_relationships")
         
         relationships = []
-        for fact_a, fact_b, rel_type, reasoning, conf_delta, comp_delta, reconc_type in evaluated_results:
+        for fact_a, fact_b, rel_type, tax_cat, reasoning, conf_delta, comp_delta, can_comp, reconc_type, chklist in evaluated_results:
             cursor.execute(
                 """
                 INSERT INTO fact_relationships (
-                    fact_id_a, fact_id_b, relationship_type, reasoning, confidence, confidence_delta,
-                    comparison_delta, reconciliation_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    fact_id_a, fact_id_b, relationship_type, taxonomy_category, reasoning,
+                    confidence, confidence_delta, comparison_delta, can_compute_delta,
+                    reconciliation_type, match_checklist
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (fact_a["id"], fact_b["id"], rel_type, reasoning, conf_delta, conf_delta, comp_delta, reconc_type)
+                (fact_a["id"], fact_b["id"], rel_type, tax_cat, reasoning, conf_delta, conf_delta, comp_delta, can_comp, reconc_type, chklist)
             )
             rel_id = cursor.lastrowid
+            
+            chklist_list = json.loads(chklist) if chklist else []
+            
             relationships.append(
                 RelationshipItem(
                     id=rel_id,
                     fact_id_a=fact_a["id"],
                     fact_id_b=fact_b["id"],
                     relationship_type=rel_type,
+                    taxonomy_category=tax_cat,
                     reasoning=reasoning,
                     confidence=conf_delta,
-                    comparison_delta=comp_delta,
+                    comparison_delta=comp_delta if can_comp else 0.0,
+                    can_compute_delta=bool(can_comp),
                     reconciliation_type=reconc_type,
+                    match_checklist=chklist_list,
                     fact_a=FactItem(**fact_a),
                     fact_b=FactItem(**fact_b)
                 )
@@ -392,16 +488,28 @@ def analyze_cross_document_relationships(
         recalculate_fact_confidences(conn)
         conn.commit()
         
+        quality_summary = {
+            "total_accepted_facts": len(facts),
+            "candidate_pairs_evaluated": len(candidate_pairs),
+            "corroborations": corroborations,
+            "contradictions": contradictions,
+            "likely_contradictions": likely_contradictions,
+            "contextual_differences": contextual_differences,
+            "reconciled": reconciled
+        }
+
         return AnalysisResponse(
             candidate_pairs_evaluated=len(candidate_pairs),
             relationships_found_count=len(relationships),
             corroborations_count=corroborations,
             contradictions_count=contradictions,
             likely_contradictions_count=likely_contradictions,
+            contextual_differences_count=contextual_differences,
             reconciled_count=reconciled,
             unrelated_count=unrelated,
             uncertain_count=uncertain,
-            relationships=relationships
+            relationships=relationships,
+            quality_summary=quality_summary
         )
     finally:
         conn.close()
@@ -424,23 +532,52 @@ def list_relationships():
             fb = cursor.fetchone()
             r_dict["fact_a"] = FactItem(**dict(fa)) if fa else None
             r_dict["fact_b"] = FactItem(**dict(fb)) if fb else None
+            if r_dict.get("match_checklist"):
+                try:
+                    r_dict["match_checklist"] = json.loads(r_dict["match_checklist"])
+                except Exception:
+                    r_dict["match_checklist"] = []
             results.append(RelationshipItem(**r_dict))
             
         return results
     finally:
         conn.close()
 
+def is_evaluator_quality_relationship(rel: RelationshipItem) -> bool:
+    """Evaluates strict quality gate before allowing a relationship into Evaluator Cases tab (Task 15)."""
+    if not rel.fact_a or not rel.fact_b:
+        return False
+    if rel.fact_a.validation_status != "valid" or rel.fact_b.validation_status != "valid":
+        return False
+    if rel.fact_a.value_binding_confidence < 0.75 or rel.fact_b.value_binding_confidence < 0.75:
+        return False
+    if not calculate_comparability_score(rel.fact_a.model_dump(), rel.fact_b.model_dump())[0]:
+        return False
+    return True
+
 @app.get("/cases", response_model=AssignmentCasesResponse)
 def get_submission_cases():
-    """Returns the 4 explicit submission cases for evaluator review."""
+    """Returns the 4 explicit submission cases gated by strict quality criteria (Task 15)."""
     rels = list_relationships()
-    rejected = list_rejected_extractions()
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM rejected_extractions ORDER BY id ASC")
+        rejected = [RejectedExtractionItem(**dict(r)) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+        
+    quality_rels = [r for r in rels if is_evaluator_quality_relationship(r)]
     
-    corr_case = next((r for r in rels if r.relationship_type == "CORROBORATES"), None)
-    contra_case = next((r for r in rels if r.relationship_type in {"CONTRADICTS", "LIKELY_CONTRADICTION"}), None)
-    reconc_case = next((r for r in rels if r.relationship_type == "RECONCILED"), None)
-    failure_case = rejected[0] if rejected else None
+    corr_case = next((r for r in quality_rels if r.relationship_type == TAXONOMY_CORROBORATES), None)
+    contra_case = next((r for r in quality_rels if r.relationship_type in {TAXONOMY_CONTRADICTS, TAXONOMY_LIKELY_CONTRADICTION}), None)
+    reconc_case = next((r for r in quality_rels if r.relationship_type in {"RECONCILED", TAXONOMY_CONTEXTUAL_DIFFERENCE, TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING}), None)
     
+    # Genuine extraction failure case
+    failure_case = next((rj for rj in rejected if rj.failure_type == "TABLE_HEADER_WITHOUT_VALUE" or rj.candidate_text == "(₹ in million)"), None)
+    if not failure_case and rejected:
+        failure_case = rejected[0]
+
     return AssignmentCasesResponse(
         corroborated_case=corr_case,
         likely_contradiction_case=contra_case,

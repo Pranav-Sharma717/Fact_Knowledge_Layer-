@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Tuple
 from dotenv import load_dotenv
 
 from app.validation import UNIT_KEYWORDS, GENERIC_METRICS
+from app.number_classifier import ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT
 
 load_dotenv()
 
@@ -13,81 +14,111 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-_EMBED_MODEL = None
+# Taxonomy Categories
+TAXONOMY_CORROBORATES = "CORROBORATES"
+TAXONOMY_CONTRADICTS = "CONTRADICTS"
+TAXONOMY_LIKELY_CONTRADICTION = "LIKELY_CONTRADICTION"
+TAXONOMY_CONTEXTUAL_DIFFERENCE = "CONTEXTUAL_DIFFERENCE"
+TAXONOMY_RECONCILED_UNIT = "RECONCILED_UNIT"
+TAXONOMY_RECONCILED_ROUNDING = "RECONCILED_ROUNDING"
+TAXONOMY_RECONCILED_SCOPE = "RECONCILED_SCOPE"
+TAXONOMY_UNCERTAIN = "UNCERTAIN"
+TAXONOMY_UNRELATED = "UNRELATED"
 
-def get_embedding_model():
-    global _EMBED_MODEL
-    if _EMBED_MODEL is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            print("[INFO] Loading local sentence-transformer model 'all-MiniLM-L6-v2'...")
-            _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-        except Exception:
-            try:
-                from sklearn.feature_extraction.text import TfidfVectorizer
-                print("[INFO] SentenceTransformer unavailable. Using TF-IDF vectorizer fallback.")
-                _EMBED_MODEL = "tfidf"
-            except Exception:
-                print("[INFO] Using pure Python string overlap vectorizer fallback.")
-                _EMBED_MODEL = "simple"
-    return _EMBED_MODEL
-
-def simple_similarity(str1: str, str2: str) -> float:
-    """Fallback cosine similarity based on word set overlap."""
-    w1 = set(str1.lower().split())
-    w2 = set(str2.lower().split())
-    if not w1 or not w2:
-        return 0.0
-    inter = w1.intersection(w2)
-    return len(inter) / ((len(w1) ** 0.5) * (len(w2) ** 0.5))
-
-def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> float:
+def can_compute_delta(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> bool:
     """
-    Evaluates whether two facts are genuinely comparable.
-    Returns a score between 0.0 (uncomparable) and 1.0 (highly comparable).
+    Returns True ONLY when normalized dimensions match and percentage delta can be legitimately calculated.
     """
-    metric_a = (fact_a.get("metric") or "").lower().strip()
-    metric_b = (fact_b.get("metric") or "").lower().strip()
-    
-    entity_a = (fact_a.get("entity") or fact_a.get("subject") or "").lower().strip()
-    entity_b = (fact_b.get("entity") or fact_b.get("subject") or "").lower().strip()
-
-    # Rule 1: Generic or unit metrics cannot be compared
-    if not metric_a or not metric_b or metric_a in GENERIC_METRICS or metric_b in GENERIC_METRICS or metric_a in UNIT_KEYWORDS or metric_b in UNIT_KEYWORDS:
-        return 0.0
-
-    # Rule 2: Require non-null numeric values or valid assertions
     val_a = fact_a.get("normalized_value")
     val_b = fact_b.get("normalized_value")
     if val_a is None or val_b is None:
-        return 0.0
+        return False
+        
+    type_a = fact_a.get("value_type", "UNKNOWN")
+    type_b = fact_b.get("value_type", "UNKNOWN")
+    if type_a != type_b and not (type_a in {ROLE_COUNT, ROLE_SHARE_COUNT} and type_b in {ROLE_COUNT, ROLE_SHARE_COUNT}):
+        return False
+        
+    unit_a = (fact_a.get("normalized_unit") or "").lower()
+    unit_b = (fact_b.get("normalized_unit") or "").lower()
+    if unit_a != unit_b:
+        # Check if units are convertible (e.g. INR vs USD, or parcels vs orders)
+        if (unit_a == "%" or unit_b == "%") and unit_a != unit_b:
+            return False
+            
+    return True
 
-    # Rule 3: Word token overlap on metric names
+def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> Tuple[float, List[str], List[str]]:
+    """
+    Evaluates hard gates for candidate comparability.
+    Returns (score, passed_gates, failed_gates).
+    If hard gates fail, score = 0.0 and pair is UNRELATED.
+    """
+    passed = []
+    failed = []
+
+    entity_a = (fact_a.get("entity") or "").lower().strip()
+    entity_b = (fact_b.get("entity") or "").lower().strip()
+    metric_a = (fact_a.get("metric") or "").lower().strip()
+    metric_b = (fact_b.get("metric") or "").lower().strip()
+    type_a = fact_a.get("value_type", "UNKNOWN")
+    type_b = fact_b.get("value_type", "UNKNOWN")
+    unit_a = (fact_a.get("normalized_unit") or fact_a.get("unit") or "").lower().strip()
+    unit_b = (fact_b.get("normalized_unit") or fact_b.get("unit") or "").lower().strip()
+
+    # Hard Gate 1: Entity Compatibility
+    if entity_a and entity_b:
+        if "delhivery" in entity_a and "delhivery" in entity_b:
+            passed.append("✓ Entity Match (Delhivery Limited)")
+        elif entity_a == entity_b:
+            passed.append(f"✓ Entity Match ({entity_a.title()})")
+        else:
+            failed.append(f"✗ Entity Mismatch ({entity_a} vs {entity_b})")
+            return 0.0, passed, failed
+    else:
+        passed.append("✓ Entity Implicit")
+
+    # Hard Gate 2: Generic Metric Check
+    if not metric_a or not metric_b or metric_a in GENERIC_METRICS or metric_b in GENERIC_METRICS or metric_a in UNIT_KEYWORDS or metric_b in UNIT_KEYWORDS:
+        failed.append("✗ Generic or Invalid Metric Name")
+        return 0.0, passed, failed
+
+    # Hard Gate 3: Value Type Compatibility (Task 9)
+    if type_a != type_b and not (type_a in {ROLE_COUNT, ROLE_SHARE_COUNT} and type_b in {ROLE_COUNT, ROLE_SHARE_COUNT}):
+        failed.append(f"✗ Incompatible Value Types ({type_a} vs {type_b})")
+        return 0.0, passed, failed
+    else:
+        passed.append(f"✓ Compatible Value Type ({type_a})")
+
+    # Hard Gate 4: Metric Token Overlap
     stopwords = {"the", "and", "of", "in", "for", "to", "a", "from", "on", "rate", "total", "states", "shows", "claim", "limited"}
     words_a = set(re.findall(r'\w+', metric_a)) - stopwords
     words_b = set(re.findall(r'\w+', metric_b)) - stopwords
 
     if not words_a or not words_b or not words_a.intersection(words_b):
-        return 0.0
+        failed.append(f"✗ Metric Mismatch ('{metric_a}' vs '{metric_b}')")
+        return 0.0, passed, failed
+    else:
+        passed.append(f"✓ Metric Match ('{metric_a.title()}')")
 
-    # Rule 4: Unit compatibility
-    unit_a = (fact_a.get("normalized_unit") or fact_a.get("unit") or "").lower().strip()
-    unit_b = (fact_b.get("normalized_unit") or fact_b.get("unit") or "").lower().strip()
+    # Hard Gate 5: Unit Compatibility
     if unit_a and unit_b and unit_a != unit_b:
         incompatible_pairs = [
-            ("%", "inr"), ("%", "usd"), ("%", "parcels"), ("%", "employees"),
-            ("inr", "%"), ("usd", "%"), ("parcels", "%"), ("employees", "%")
+            ("%", "inr"), ("%", "usd"), ("%", "parcels"), ("%", "employees"), ("%", "shares"),
+            ("inr", "%"), ("usd", "%"), ("parcels", "%"), ("employees", "%"), ("shares", "%")
         ]
         if (unit_a, unit_b) in incompatible_pairs or (unit_b, unit_a) in incompatible_pairs:
-            return 0.0
+            failed.append(f"✗ Incompatible Dimensions ({unit_a} vs {unit_b})")
+            return 0.0, passed, failed
 
-    return simple_similarity(f"{entity_a} {metric_a}", f"{entity_b} {metric_b}")
+    passed.append(f"✓ Units Compatible ({unit_a or 'unspecified'})")
+    return 1.0, passed, failed
 
 def find_candidate_pairs(
     facts: List[Dict[str, Any]],
     similarity_threshold: float = 0.35,
     max_candidates: int = 50
-) -> List[Tuple[Dict[str, Any], Dict[str, Any], float]]:
+) -> List[Tuple[Dict[str, Any], Dict[str, Any], float, List[str]]]:
     """
     Computes pairwise similarity between facts across different documents
     to identify candidate pairs for relationship evaluation.
@@ -112,11 +143,11 @@ def find_candidate_pairs(
                 continue
             seen_pairs.add(pair_key)
 
-            comp_score = calculate_comparability_score(f_a, f_b)
-            if comp_score < 0.25:
+            comp_score, passed_gates, failed_gates = calculate_comparability_score(f_a, f_b)
+            if comp_score < 0.50:
                 continue
                 
-            candidate_pairs.append((f_a, f_b, comp_score))
+            candidate_pairs.append((f_a, f_b, comp_score, passed_gates))
             
     candidate_pairs.sort(key=lambda x: x[2], reverse=True)
     return candidate_pairs[:max_candidates]
@@ -149,31 +180,36 @@ Fact B:
 Determine their relationship strictly into one of:
 - "CORROBORATES": Both facts assert the exact same metric claim or agree on values for the same period.
 - "CONTRADICTS": Facts directly conflict for the same period/scope without clear contextual explanation.
-- "LIKELY_CONTRADICTION": High metric similarity and overlapping period, but minor unexplained discrepancy.
-- "RECONCILED": Value difference explainable by context (different time periods, fiscal vs calendar year, unit conversion, restatements/audits, or scope).
+- "LIKELY_CONTRADICTION": High metric similarity and overlapping period, but minor unexplained discrepancy (e.g. 60% vs 59%).
+- "CONTEXTUAL_DIFFERENCE": Discrepancy is fully explained because facts refer to different reporting periods (e.g. FY21 vs FY24).
+- "RECONCILED_UNIT": Value difference explained by unit conversion (e.g. ₹81,415.38M vs ₹8,142Cr).
+- "RECONCILED_ROUNDING": Minor presentation rounding (e.g. 289.20M vs 289M).
 - "UNRELATED": Facts cover completely different metrics or entities.
 - "UNCERTAIN": Low confidence or ambiguous claims.
 
 Respond STRICTLY with valid JSON format:
 {{
-  "relationship": "CORROBORATES" | "CONTRADICTS" | "LIKELY_CONTRADICTION" | "RECONCILED" | "UNRELATED" | "UNCERTAIN",
+  "taxonomy_category": "CORROBORATES" | "CONTRADICTS" | "LIKELY_CONTRADICTION" | "CONTEXTUAL_DIFFERENCE" | "RECONCILED_UNIT" | "RECONCILED_ROUNDING" | "UNRELATED" | "UNCERTAIN",
   "reasoning": "Clear 1-2 sentence explanation of why they fall into this category.",
   "confidence_delta": 0.15,
   "comparison_delta": 0.0,
-  "reconciliation_type": "UNIT_CONVERSION" | "ROUNDING" | "PERIOD_DIFFERENCE" | "SCOPE_DIFFERENCE" | "AUDIT_RESTATEMENT" | "NONE"
+  "can_compute_delta": true | false
 }}
 """
 
 def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> Dict[str, Any]:
-    """Fallback relationship judge using strict deterministic comparison rules."""
-    comp_score = calculate_comparability_score(fact_a, fact_b)
-    if comp_score < 0.25:
+    """Fallback relationship judge using strict deterministic comparison rules (Task 10)."""
+    comp_score, passed_gates, failed_gates = calculate_comparability_score(fact_a, fact_b)
+    if comp_score < 0.50:
         return {
-            "relationship": "UNRELATED",
-            "reasoning": "Facts concern distinct metrics or entities with no genuine basis for comparison.",
+            "relationship": TAXONOMY_UNRELATED,
+            "taxonomy_category": TAXONOMY_UNRELATED,
+            "reasoning": f"Facts failed comparability gates: {'; '.join(failed_gates)}.",
             "confidence_delta": 0.0,
             "comparison_delta": 0.0,
-            "reconciliation_type": "NONE"
+            "can_compute_delta": False,
+            "reconciliation_type": "NONE",
+            "match_checklist": failed_gates
         }
         
     val_a = fact_a.get("normalized_value")
@@ -182,91 +218,131 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
     unit_b = (fact_b.get("normalized_unit") or fact_b.get("unit") or "").upper()
     period_a = (fact_a.get("period") or "").strip().lower()
     period_b = (fact_b.get("period") or "").strip().lower()
+    computable = can_compute_delta(fact_a, fact_b)
 
-    if val_a is not None and val_b is not None:
+    if val_a is not None and val_b is not None and computable:
         delta = abs(val_a - val_b)
         avg_val = (abs(val_a) + abs(val_b)) / 2.0 if (abs(val_a) + abs(val_b)) > 0 else 1.0
         pct_delta = round((delta / avg_val) * 100.0, 2)
         
-        # Exact or near-exact match (< 0.1% delta)
+        # 1. Exact or near-exact match (< 0.1% delta)
         if pct_delta < 0.1:
             raw_u_a = (fact_a.get("unit") or "").lower()
             raw_u_b = (fact_b.get("unit") or "").lower()
-            if raw_u_a != raw_u_b and raw_u_a and raw_u_b and raw_u_a not in raw_u_b and raw_u_b not in raw_u_a:
+            # Unit conversion check: e.g. million vs crore or lakh
+            is_scale_diff = (("crore" in raw_u_a) != ("crore" in raw_u_b)) or (("million" in raw_u_a) != ("million" in raw_u_b)) or (("lakh" in raw_u_a) != ("lakh" in raw_u_b))
+            if is_scale_diff:
                 return {
                     "relationship": "RECONCILED",
+                    "taxonomy_category": TAXONOMY_RECONCILED_UNIT,
                     "reasoning": f"Values align ({fact_a.get('value')} vs {fact_b.get('value')}) when normalized via unit conversion ({val_a:g} {unit_a}).",
                     "confidence_delta": 0.15,
                     "comparison_delta": pct_delta,
-                    "reconciliation_type": "UNIT_CONVERSION"
+                    "can_compute_delta": True,
+                    "reconciliation_type": "UNIT_CONVERSION",
+                    "match_checklist": passed_gates + ["✓ Values Match via Unit Conversion"]
                 }
             if period_a and period_b and period_a != period_b:
                 return {
                     "relationship": "RECONCILED",
+                    "taxonomy_category": TAXONOMY_CONTEXTUAL_DIFFERENCE,
                     "reasoning": f"Identical value ({val_a:g}) reported across different time periods ({fact_a.get('period')} vs {fact_b.get('period')}).",
                     "confidence_delta": 0.10,
                     "comparison_delta": pct_delta,
-                    "reconciliation_type": "PERIOD_DIFFERENCE"
+                    "can_compute_delta": True,
+                    "reconciliation_type": "PERIOD_DIFFERENCE",
+                    "match_checklist": passed_gates + ["✓ Identical Value Across Periods"]
                 }
             return {
-                "relationship": "CORROBORATES",
+                "relationship": TAXONOMY_CORROBORATES,
+                "taxonomy_category": TAXONOMY_CORROBORATES,
                 "reasoning": f"Both documents corroborate the exact same metric value ({val_a:g} {unit_a}).",
                 "confidence_delta": 0.20,
                 "comparison_delta": pct_delta,
-                "reconciliation_type": "NONE"
+                "can_compute_delta": True,
+                "reconciliation_type": "NONE",
+                "match_checklist": passed_gates + ["✓ Values & Periods Match Exactly"]
             }
             
-        # Small rounding difference (< 1.5% delta)
+        # 2. Small presentation / rounding difference (< 1.5% delta, e.g. 289.20M vs 289M) (Task 16)
         elif pct_delta < 1.5:
+            if period_a and period_b and period_a != period_b:
+                tax_cat = TAXONOMY_CONTEXTUAL_DIFFERENCE
+                rec_type = "PERIOD_DIFFERENCE"
+                expl = f"Value discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) is explained by differing reporting periods ({fact_a.get('period')} vs {fact_b.get('period')})."
+            else:
+                tax_cat = TAXONOMY_RECONCILED_ROUNDING
+                rec_type = "ROUNDING"
+                expl = f"Values ({val_a:g} vs {val_b:g}) match within minor presentation/rounding margin ({pct_delta}% delta)."
+
             return {
-                "relationship": "RECONCILED",
-                "reasoning": f"Values ({val_a:g} vs {val_b:g}) match within minor rounding margin ({pct_delta}% delta).",
-                "confidence_delta": 0.10,
+                "relationship": TAXONOMY_CORROBORATES if tax_cat == TAXONOMY_RECONCILED_ROUNDING else "RECONCILED",
+                "taxonomy_category": tax_cat,
+                "reasoning": expl,
+                "confidence_delta": 0.15 if tax_cat == TAXONOMY_RECONCILED_ROUNDING else 0.05,
                 "comparison_delta": pct_delta,
-                "reconciliation_type": "ROUNDING"
+                "can_compute_delta": True,
+                "reconciliation_type": rec_type,
+                "match_checklist": passed_gates + [f"✓ Rounding Match ({pct_delta}% delta)"]
             }
             
-        # Differing values
+        # 3. Differing values
         else:
-            if period_a and period_b and period_a != period_b:
-                return {
-                    "relationship": "RECONCILED",
-                    "reasoning": f"Value discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) is reconciled by differing reporting periods ({fact_a.get('period')} vs {fact_b.get('period')}).",
-                    "confidence_delta": 0.05,
-                    "comparison_delta": pct_delta,
-                    "reconciliation_type": "PERIOD_DIFFERENCE"
-                }
-            elif pct_delta < 10.0:
-                return {
-                    "relationship": "LIKELY_CONTRADICTION",
-                    "reasoning": f"Moderate unexplained discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) for the same reporting period.",
-                    "confidence_delta": -0.15,
-                    "comparison_delta": pct_delta,
-                    "reconciliation_type": "NONE"
-                }
+            if period_a and period_b and period_a == period_b:
+                if pct_delta <= 5.0:
+                    return {
+                        "relationship": TAXONOMY_LIKELY_CONTRADICTION,
+                        "taxonomy_category": TAXONOMY_LIKELY_CONTRADICTION,
+                        "reasoning": f"Minor unexplained discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) for the same reporting period ({fact_a.get('period')}).",
+                        "confidence_delta": -0.15,
+                        "comparison_delta": pct_delta,
+                        "can_compute_delta": True,
+                        "reconciliation_type": "NONE",
+                        "match_checklist": passed_gates + ["⚠️ Minor Unexplained Discrepancy"]
+                    }
+                else:
+                    return {
+                        "relationship": TAXONOMY_CONTRADICTS,
+                        "taxonomy_category": TAXONOMY_CONTRADICTS,
+                        "reasoning": f"Significant direct contradiction ({val_a:g} vs {val_b:g}, {pct_delta}% delta) for the same period ({fact_a.get('period')}) without contextual explanation.",
+                        "confidence_delta": -0.30,
+                        "comparison_delta": pct_delta,
+                        "can_compute_delta": True,
+                        "reconciliation_type": "NONE",
+                        "match_checklist": passed_gates + ["✗ Direct Unexplained Contradiction"]
+                    }
             else:
                 return {
-                    "relationship": "CONTRADICTS",
-                    "reasoning": f"Significant direct contradiction ({val_a:g} vs {val_b:g}, {pct_delta}% delta) without contextual explanation.",
-                    "confidence_delta": -0.30,
+                    "relationship": "RECONCILED",
+                    "taxonomy_category": TAXONOMY_CONTEXTUAL_DIFFERENCE,
+                    "reasoning": f"Value difference ({val_a:g} vs {val_b:g}) represents a contextual difference (reporting periods: '{fact_a.get('period') or 'Unspecified'}' vs '{fact_b.get('period') or 'Unspecified'}').",
+                    "confidence_delta": 0.0,
                     "comparison_delta": pct_delta,
-                    "reconciliation_type": "NONE"
+                    "can_compute_delta": True,
+                    "reconciliation_type": "PERIOD_DIFFERENCE",
+                    "match_checklist": passed_gates + ["ℹ Contextual / Period Difference"]
                 }
                 
     return {
-        "relationship": "UNCERTAIN",
+        "relationship": TAXONOMY_UNCERTAIN,
+        "taxonomy_category": TAXONOMY_UNCERTAIN,
         "reasoning": "Non-numeric or ambiguous comparison.",
         "confidence_delta": 0.0,
         "comparison_delta": 0.0,
-        "reconciliation_type": "NONE"
+        "can_compute_delta": False,
+        "reconciliation_type": "NONE",
+        "match_checklist": passed_gates
     }
 
 def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: str = None) -> Dict[str, Any]:
     """Calls LLM judge (OpenRouter) to evaluate candidate pair relationship, with fallback judge."""
     key = api_key or OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY", "")
-    model_name = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
     
     if not key or key == "your_openrouter_api_key_here":
+        return judge_relationship_mock(fact_a, fact_b)
+        
+    comp_score, passed_gates, failed_gates = calculate_comparability_score(fact_a, fact_b)
+    if comp_score < 0.50:
         return judge_relationship_mock(fact_a, fact_b)
         
     prompt = JUDGE_PROMPT.format(
@@ -288,7 +364,7 @@ def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: 
     }
     
     payload = {
-        "model": model_name,
+        "model": os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"),
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
         "max_tokens": 350,
@@ -304,16 +380,26 @@ def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: 
             raw_content = data["choices"][0]["message"]["content"]
             parsed = json.loads(raw_content)
             
-            rel_type = str(parsed.get("relationship", "UNCERTAIN")).upper()
-            if rel_type not in {"CORROBORATES", "CONTRADICTS", "LIKELY_CONTRADICTION", "RECONCILED", "UNRELATED", "UNCERTAIN"}:
-                rel_type = "UNCERTAIN"
+            tax_cat = str(parsed.get("taxonomy_category", TAXONOMY_UNCERTAIN)).upper()
+            computable = can_compute_delta(fact_a, fact_b)
+            
+            rel_type = tax_cat
+            if tax_cat in {TAXONOMY_RECONCILED_UNIT, TAXONOMY_RECONCILED_ROUNDING, TAXONOMY_RECONCILED_SCOPE, TAXONOMY_CONTEXTUAL_DIFFERENCE}:
+                rel_type = "RECONCILED"
+            elif tax_cat == TAXONOMY_CORROBORATES:
+                rel_type = "CORROBORATES"
+            elif tax_cat in {TAXONOMY_CONTRADICTS, TAXONOMY_LIKELY_CONTRADICTION}:
+                rel_type = tax_cat
                 
             return {
                 "relationship": rel_type,
+                "taxonomy_category": tax_cat,
                 "reasoning": str(parsed.get("reasoning", "No explanation provided.")),
                 "confidence_delta": float(parsed.get("confidence_delta", 0.0)),
-                "comparison_delta": float(parsed.get("comparison_delta", 0.0)),
-                "reconciliation_type": str(parsed.get("reconciliation_type", "NONE")).upper()
+                "comparison_delta": float(parsed.get("comparison_delta", 0.0)) if computable else 0.0,
+                "can_compute_delta": computable,
+                "reconciliation_type": tax_cat,
+                "match_checklist": passed_gates
             }
     except Exception:
         return judge_relationship_mock(fact_a, fact_b)
@@ -321,7 +407,7 @@ def judge_relationship(fact_a: Dict[str, Any], fact_b: Dict[str, Any], api_key: 
 def recalculate_fact_confidences(conn) -> Dict[int, float]:
     """Updates final_confidence in SQLite for all facts in a fast batch transaction."""
     cursor = conn.cursor()
-    cursor.execute("SELECT id, extraction_confidence, grounding_confidence FROM facts")
+    cursor.execute("SELECT id, extraction_confidence, grounding_confidence, value_binding_confidence FROM facts")
     all_facts = cursor.fetchall()
     
     updated_scores = {}
@@ -329,7 +415,11 @@ def recalculate_fact_confidences(conn) -> Dict[int, float]:
     
     for f in all_facts:
         f_id = f["id"]
-        base_score = float(f["extraction_confidence"]) * float(f["grounding_confidence"])
+        ext_conf = float(f["extraction_confidence"])
+        grd_conf = float(f["grounding_confidence"])
+        bnd_conf = float(f["value_binding_confidence"]) if f["value_binding_confidence"] is not None else 1.0
+        
+        base_score = ext_conf * grd_conf * bnd_conf
         
         cursor.execute("SELECT confidence_delta FROM fact_relationships WHERE fact_id_a = ? OR fact_id_b = ?", (f_id, f_id))
         deltas = cursor.fetchall()

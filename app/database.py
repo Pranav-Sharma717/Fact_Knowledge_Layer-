@@ -65,7 +65,13 @@ def init_db():
         page INTEGER NOT NULL,
         extraction_confidence REAL NOT NULL DEFAULT 1.0,
         grounding_confidence REAL NOT NULL DEFAULT 1.0,
+        value_binding_confidence REAL NOT NULL DEFAULT 1.0,
         final_confidence REAL NOT NULL DEFAULT 1.0,
+        value_type TEXT NOT NULL DEFAULT 'UNKNOWN',
+        is_numeric INTEGER NOT NULL DEFAULT 1,
+        value_source_span TEXT,
+        metric_source_span TEXT,
+        temporal_source_span TEXT,
         extraction_method TEXT NOT NULL DEFAULT 'llm',
         validation_status TEXT NOT NULL DEFAULT 'valid',
         validation_notes TEXT,
@@ -89,6 +95,12 @@ def init_db():
         ("as_of_date", "TEXT"),
         ("scope", "TEXT"),
         ("qualifiers", "TEXT"),
+        ("value_binding_confidence", "REAL NOT NULL DEFAULT 1.0"),
+        ("value_type", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
+        ("is_numeric", "INTEGER NOT NULL DEFAULT 1"),
+        ("value_source_span", "TEXT"),
+        ("metric_source_span", "TEXT"),
+        ("temporal_source_span", "TEXT"),
         ("extraction_method", "TEXT NOT NULL DEFAULT 'llm'"),
         ("validation_status", "TEXT NOT NULL DEFAULT 'valid'"),
         ("validation_notes", "TEXT")
@@ -97,7 +109,7 @@ def init_db():
         if col_name not in existing_cols:
             cursor.execute(f"ALTER TABLE facts ADD COLUMN {col_name} {col_def};")
 
-    # Rejected Extractions table (Task 8)
+    # Rejected Extractions table (Task 8 & 14)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS rejected_extractions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,11 +131,14 @@ def init_db():
         fact_id_a INTEGER NOT NULL,
         fact_id_b INTEGER NOT NULL,
         relationship_type TEXT NOT NULL,
+        taxonomy_category TEXT NOT NULL DEFAULT 'UNCERTAIN',
         reasoning TEXT NOT NULL,
         confidence REAL NOT NULL DEFAULT 1.0,
         confidence_delta REAL NOT NULL DEFAULT 0.0,
         comparison_delta REAL NOT NULL DEFAULT 0.0,
+        can_compute_delta INTEGER NOT NULL DEFAULT 0,
         reconciliation_type TEXT NOT NULL DEFAULT 'NONE',
+        match_checklist TEXT,
         FOREIGN KEY (fact_id_a) REFERENCES facts (id) ON DELETE CASCADE,
         FOREIGN KEY (fact_id_b) REFERENCES facts (id) ON DELETE CASCADE
     );
@@ -138,9 +153,25 @@ def init_db():
         cursor.execute("ALTER TABLE fact_relationships ADD COLUMN confidence_delta REAL NOT NULL DEFAULT 0.0;")
     if "comparison_delta" not in rel_cols:
         cursor.execute("ALTER TABLE fact_relationships ADD COLUMN comparison_delta REAL NOT NULL DEFAULT 0.0;")
+    if "can_compute_delta" not in rel_cols:
+        cursor.execute("ALTER TABLE fact_relationships ADD COLUMN can_compute_delta INTEGER NOT NULL DEFAULT 0;")
+    if "taxonomy_category" not in rel_cols:
+        cursor.execute("ALTER TABLE fact_relationships ADD COLUMN taxonomy_category TEXT NOT NULL DEFAULT 'UNCERTAIN';")
     if "reconciliation_type" not in rel_cols:
         cursor.execute("ALTER TABLE fact_relationships ADD COLUMN reconciliation_type TEXT NOT NULL DEFAULT 'NONE';")
+    if "match_checklist" not in rel_cols:
+        cursor.execute("ALTER TABLE fact_relationships ADD COLUMN match_checklist TEXT;")
 
+    conn.commit()
+    conn.close()
+
+def clear_database():
+    conn = get_db_connection()
+    conn.execute("DELETE FROM fact_relationships;")
+    conn.execute("DELETE FROM rejected_extractions;")
+    conn.execute("DELETE FROM facts;")
+    conn.execute("DELETE FROM chunks;")
+    conn.execute("DELETE FROM documents;")
     conn.commit()
     conn.close()
 
