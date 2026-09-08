@@ -5,6 +5,8 @@ import re
 from typing import List, Dict, Any, Tuple
 from dotenv import load_dotenv
 
+from app.validation import UNIT_KEYWORDS, GENERIC_METRICS
+
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -42,8 +44,7 @@ def simple_similarity(str1: str, str2: str) -> float:
 def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> float:
     """
     Evaluates whether two facts are genuinely comparable.
-    Returns a score between 0.0 (completely uncomparable) and 1.0 (highly comparable).
-    If metrics or entities are completely distinct, returns 0.0.
+    Returns a score between 0.0 (uncomparable) and 1.0 (highly comparable).
     """
     metric_a = (fact_a.get("metric") or "").lower().strip()
     metric_b = (fact_b.get("metric") or "").lower().strip()
@@ -51,23 +52,27 @@ def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]
     entity_a = (fact_a.get("entity") or fact_a.get("subject") or "").lower().strip()
     entity_b = (fact_b.get("entity") or fact_b.get("subject") or "").lower().strip()
 
-    # Rule 1: If metrics are completely unrelated (zero word overlap for non-generic metrics), score = 0.0
-    if metric_a and metric_b and metric_a != "general assertion" and metric_b != "general assertion":
-        words_a = set(re.findall(r'\w+', metric_a))
-        words_b = set(re.findall(r'\w+', metric_b))
-        stopwords = {"the", "and", "of", "in", "for", "to", "a", "from", "on", "rate", "total", "states", "shows", "claim"}
-        words_a_clean = words_a - stopwords
-        words_b_clean = words_b - stopwords
-        
-        if words_a_clean and words_b_clean:
-            overlap = words_a_clean.intersection(words_b_clean)
-            if not overlap:
-                return 0.0
-                
-    # Rule 2: If normalized units are fundamentally incompatible (e.g., % vs INR, or headcount vs currency)
+    # Rule 1: Generic or unit metrics cannot be compared
+    if not metric_a or not metric_b or metric_a in GENERIC_METRICS or metric_b in GENERIC_METRICS or metric_a in UNIT_KEYWORDS or metric_b in UNIT_KEYWORDS:
+        return 0.0
+
+    # Rule 2: Require non-null numeric values or valid assertions
+    val_a = fact_a.get("normalized_value")
+    val_b = fact_b.get("normalized_value")
+    if val_a is None or val_b is None:
+        return 0.0
+
+    # Rule 3: Word token overlap on metric names
+    stopwords = {"the", "and", "of", "in", "for", "to", "a", "from", "on", "rate", "total", "states", "shows", "claim", "limited"}
+    words_a = set(re.findall(r'\w+', metric_a)) - stopwords
+    words_b = set(re.findall(r'\w+', metric_b)) - stopwords
+
+    if not words_a or not words_b or not words_a.intersection(words_b):
+        return 0.0
+
+    # Rule 4: Unit compatibility
     unit_a = (fact_a.get("normalized_unit") or fact_a.get("unit") or "").lower().strip()
     unit_b = (fact_b.get("normalized_unit") or fact_b.get("unit") or "").lower().strip()
-    
     if unit_a and unit_b and unit_a != unit_b:
         incompatible_pairs = [
             ("%", "inr"), ("%", "usd"), ("%", "parcels"), ("%", "employees"),
@@ -75,21 +80,17 @@ def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]
         ]
         if (unit_a, unit_b) in incompatible_pairs or (unit_b, unit_a) in incompatible_pairs:
             return 0.0
-            
-    # Compute base textual similarity of metric and entity
-    str_a = f"{entity_a} {metric_a}"
-    str_b = f"{entity_b} {metric_b}"
-    return simple_similarity(str_a, str_b)
+
+    return simple_similarity(f"{entity_a} {metric_a}", f"{entity_b} {metric_b}")
 
 def find_candidate_pairs(
     facts: List[Dict[str, Any]],
     similarity_threshold: float = 0.35,
-    max_candidates: int = 30
+    max_candidates: int = 50
 ) -> List[Tuple[Dict[str, Any], Dict[str, Any], float]]:
     """
     Computes pairwise similarity between facts across different documents
     to identify candidate pairs for relationship evaluation.
-    Filters out non-comparable facts and limits to max_candidates.
     """
     if len(facts) < 2:
         return []
@@ -103,19 +104,16 @@ def find_candidate_pairs(
             f_a = facts[i]
             f_b = facts[j]
             
-            # Cross-document check only
             if f_a["document_id"] == f_b["document_id"]:
                 continue
                 
-            # Prevent duplicate (A, B) vs (B, A)
             pair_key = (min(f_a["id"], f_b["id"]), max(f_a["id"], f_b["id"]))
             if pair_key in seen_pairs:
                 continue
             seen_pairs.add(pair_key)
 
-            # Comparability check
             comp_score = calculate_comparability_score(f_a, f_b)
-            if comp_score < 0.15:
+            if comp_score < 0.25:
                 continue
                 
             candidate_pairs.append((f_a, f_b, comp_score))
@@ -149,7 +147,7 @@ Fact B:
 - Verbatim Quote: "{quote_b}"
 
 Determine their relationship strictly into one of:
-- "CORROBORATES": Both facts assert the exact same metric claim or agree on values.
+- "CORROBORATES": Both facts assert the exact same metric claim or agree on values for the same period.
 - "CONTRADICTS": Facts directly conflict for the same period/scope without clear contextual explanation.
 - "LIKELY_CONTRADICTION": High metric similarity and overlapping period, but minor unexplained discrepancy.
 - "RECONCILED": Value difference explainable by context (different time periods, fiscal vs calendar year, unit conversion, restatements/audits, or scope).
@@ -169,7 +167,7 @@ Respond STRICTLY with valid JSON format:
 def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> Dict[str, Any]:
     """Fallback relationship judge using strict deterministic comparison rules."""
     comp_score = calculate_comparability_score(fact_a, fact_b)
-    if comp_score < 0.15:
+    if comp_score < 0.25:
         return {
             "relationship": "UNRELATED",
             "reasoning": "Facts concern distinct metrics or entities with no genuine basis for comparison.",
@@ -194,7 +192,7 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
         if pct_delta < 0.1:
             raw_u_a = (fact_a.get("unit") or "").lower()
             raw_u_b = (fact_b.get("unit") or "").lower()
-            if raw_u_a != raw_u_b and raw_u_a and raw_u_b:
+            if raw_u_a != raw_u_b and raw_u_a and raw_u_b and raw_u_a not in raw_u_b and raw_u_b not in raw_u_a:
                 return {
                     "relationship": "RECONCILED",
                     "reasoning": f"Values align ({fact_a.get('value')} vs {fact_b.get('value')}) when normalized via unit conversion ({val_a:g} {unit_a}).",
@@ -241,7 +239,7 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
             elif pct_delta < 10.0:
                 return {
                     "relationship": "LIKELY_CONTRADICTION",
-                    "reasoning": f"Moderate unexplained discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) for the same period.",
+                    "reasoning": f"Moderate unexplained discrepancy ({val_a:g} vs {val_b:g}, {pct_delta}% delta) for the same reporting period.",
                     "confidence_delta": -0.15,
                     "comparison_delta": pct_delta,
                     "reconciliation_type": "NONE"

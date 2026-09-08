@@ -2,11 +2,11 @@ import os
 import json
 import httpx
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from dotenv import load_dotenv
 
 from app.normalization import normalize_fact
-from app.validation import validate_fact_candidate, is_header_or_unit_label
+from app.validation import validate_fact_candidate, is_header_or_unit_label, UNIT_KEYWORDS, GENERIC_METRICS
 
 load_dotenv()
 
@@ -20,9 +20,11 @@ Your job is to read a document chunk and extract all discrete, atomic facts pres
 Guidelines:
 1. Every fact must be atomic, precise, and grounded in the source text.
 2. Grounding is CRITICAL: You MUST supply a 'raw_quote' field containing the EXACT VERBATIM substring from the text supporting the fact.
-3. Schema for each fact:
-   - "entity": Specific entity or organization described (e.g. "Delhivery", "India", "Express Parcel Service"), or "Unknown Entity" if implicit.
-   - "metric": Specific metric or phenomenon (e.g. "Revenue from Operations", "EBITDA Margin", "Express Parcel Volume", "GDP Growth Rate", "Employee Attrition Rate").
+3. Every metric MUST be specific and descriptive (e.g. "Revenue from Operations", "Express Parcel Volume", "EBITDA Margin", "Employee Attrition Rate").
+   NEVER use unit words ("million", "crore", "inr") or generic terms ("General Metric", "Amount") as the metric name.
+4. Schema for each fact:
+   - "entity": Specific entity or organization described (e.g. "Delhivery", "India", "Express Parcel Service"), or null if implicit.
+   - "metric": Specific metric or phenomenon (e.g. "Revenue from Operations", "EBITDA Margin", "Express Parcel Volume", "GDP Growth Rate").
    - "predicate": Relation/verb (e.g. "was", "reached", "grew by", "reported as").
    - "value": Raw value as stated in text (e.g. "₹81,415.38 million", "289.20 million", "7.2%").
    - "unit": Unit of measurement if applicable (e.g. "INR", "parcels", "%", "employees"), or null.
@@ -53,6 +55,48 @@ Respond strictly with valid JSON format:
 }
 """
 
+KNOWN_METRIC_RULES = [
+    (r'revenue\s+from\s+operations', 'Revenue from Operations'),
+    (r'express\s+parcel\s+(?:service\s+)?volume', 'Express Parcel Volume'),
+    (r'express\s+parcel\s+revenue', 'Express Parcel Revenue'),
+    (r'ebitda\s+margin', 'EBITDA Margin'),
+    (r'\bebitda\b', 'EBITDA'),
+    (r'net\s+profit', 'Net Profit'),
+    (r'profit\s+after\s+tax', 'Profit After Tax'),
+    (r'headcount|employee\s+count|workforce', 'Workforce Size'),
+    (r'attrition\s+rate|employee\s+attrition', 'Employee Attrition Rate'),
+    (r'gdp\s+growth', 'GDP Growth Rate'),
+    (r'inflation\s+rate|cpi', 'Inflation Rate'),
+    (r'repo\s+rate', 'Repo Rate'),
+    (r'share\s+capital', 'Share Capital'),
+    (r'total\s+income', 'Total Income'),
+    (r'operating\s+income', 'Operating Income'),
+    (r'cash\s+flow', 'Cash Flow'),
+    (r'borrowings|net\s+debt', 'Net Debt / Borrowings'),
+]
+
+def extract_metric_from_line(line: str) -> Optional[str]:
+    """Extracts or infers a specific financial/operational metric from text."""
+    clean_line = line.lower()
+    for pattern, canonical_name in KNOWN_METRIC_RULES:
+        if re.search(pattern, clean_line):
+            return canonical_name
+            
+    # Strip numbers, unit keywords, and symbols
+    stripped = re.sub(r'[-+]?\d+(?:,\d+)*(?:\.\d+)?', '', line)
+    stripped = re.sub(r'\b(million|crore|lakh|billion|thousand|mn|bn|cr|inr|usd|rs|rupees|dollars|\%)\b', '', stripped, flags=re.IGNORECASE)
+    words = [w.strip(' :-₹$%,()[]{}') for w in stripped.split() if w.strip(' :-₹$%,()[]{}')]
+    
+    stopwords = {"total", "for", "the", "year", "ended", "as", "at", "march", "december", "particulars", "note", "ref", "in", "statement"}
+    clean_words = [w for w in words if w.lower() not in stopwords]
+    
+    if len(clean_words) >= 1:
+        candidate_metric = " ".join(clean_words[:4]).title()
+        if len(candidate_metric) >= 4 and candidate_metric.lower() not in UNIT_KEYWORDS and candidate_metric.lower() not in GENERIC_METRICS:
+            return candidate_metric
+            
+    return None
+
 def normalize_period_str(period: str) -> str:
     if not period:
         return ""
@@ -65,7 +109,6 @@ def infer_doc_defaults(doc_filename: str) -> Tuple[str, str]:
     """Infers fallback entity and period from document filename."""
     fn = (doc_filename or "").lower()
     
-    # Infer entity
     if "delhivery" in fn:
         entity = "Delhivery Limited"
     elif "rbi" in fn:
@@ -77,7 +120,6 @@ def infer_doc_defaults(doc_filename: str) -> Tuple[str, str]:
     else:
         entity = "Document Entity"
         
-    # Infer period
     if "fy24" in fn or "2024-25" in fn or "2024" in fn:
         period = "FY 2024"
     elif "fy23" in fn or "2023" in fn:
@@ -117,7 +159,7 @@ def extract_facts_from_chunk_mock(
     lines = [line.strip() for line in chunk_text.split('\n') if line.strip()]
     
     for line in lines:
-        if is_header_or_unit_label(line) or line.lower() in {"million", "crore", "lakh", "billion", "%", "(₹ in million)"}:
+        if is_header_or_unit_label(line) or line.lower() in UNIT_KEYWORDS or line.lower() in GENERIC_METRICS:
             candidates.append({
                 "entity": default_entity,
                 "metric": "Table Unit Header",
@@ -130,19 +172,18 @@ def extract_facts_from_chunk_mock(
             })
             continue
 
-        if any(kw in line.lower() for kw in ["revenue", "$", "%", "employees", "crore", "billion", "million", "growth", "headcount", "profit", "expenditure", "ebitda", "volume", "gdp", "attrition"]):
+        if any(kw in line.lower() for kw in ["revenue", "$", "%", "employees", "crore", "billion", "million", "growth", "headcount", "profit", "expenditure", "ebitda", "volume", "gdp", "attrition", "capital", "debt", "income"]):
             num_match = re.search(r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)', line)
             val_str = num_match.group(1) if num_match else line
             
-            metric_part = re.sub(r'[-+]?\d+(?:,\d+)*(?:\.\d+)?', '', line).strip(' :-₹$%,()')
-            metric_name = metric_part if len(metric_part) > 3 else "General Metric"
+            inferred_metric = extract_metric_from_line(line)
             
             period_match = re.search(r'\b(FY\s?\d{2,4}|Q[1-4]\s?FY?\d{2,4}|20\d{2})\b', line, re.IGNORECASE)
             period_str = normalize_period_str(period_match.group(1)) if period_match else default_period
 
             candidates.append({
                 "entity": default_entity,
-                "metric": metric_name,
+                "metric": inferred_metric or "",
                 "predicate": "states",
                 "value": val_str,
                 "unit": "INR" if ("₹" in line or "inr" in line.lower()) else ("%" if "%" in line else None),
@@ -246,14 +287,17 @@ def extract_facts_from_chunk(
                 ground_conf = verify_grounding(raw_quote, chunk_text)
                 final_conf = round(ext_conf * ground_conf, 3)
                 
+                period_raw = f.get("period") or f.get("time_scope")
+                period_str = normalize_period_str(period_raw) if period_raw else default_period
+
                 cand = {
                     "entity": f.get("entity") or f.get("subject") or default_entity,
                     "subject": f.get("entity") or f.get("subject") or default_entity,
-                    "metric": f.get("metric") or "General Assertion",
+                    "metric": f.get("metric") or "",
                     "predicate": f.get("predicate", "states"),
                     "value": str(f.get("value", "")),
                     "unit": f.get("unit"),
-                    "period": f.get("period") or f.get("time_scope") or default_period,
+                    "period": period_str,
                     "as_of_date": f.get("as_of_date"),
                     "scope": f.get("scope"),
                     "qualifiers": f.get("qualifiers"),
