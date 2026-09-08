@@ -19,7 +19,8 @@ def run_audit():
     pdf_dir = os.path.abspath("starter-datasets/starter-datasets/delhivery")
     pdf_files = [
         os.path.join(pdf_dir, "01-delhivery-prospectus-2022-excerpt.pdf"),
-        os.path.join(pdf_dir, "02-delhivery-annual-report-fy24-excerpt.pdf")
+        os.path.join(pdf_dir, "02-delhivery-annual-report-fy24-excerpt.pdf"),
+        os.path.join(pdf_dir, "03-delhivery-q4-fy24-earnings-presentation.pdf")
     ]
     
     doc_ids = []
