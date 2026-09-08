@@ -188,15 +188,26 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
         all_rejected = []
         extraction_methods = []
         combined_warnings = []
+        llm_failed = False
         
         for chunk in chunks:
             c_id = chunk["id"]
             c_text = chunk["text"]
             p_num = chunk["page_number"]
             
-            valid_facts, rejected_list, method, warnings = extract_facts_from_chunk(
-                c_text, p_num, api_key=api_key, model=model, doc_filename=doc_filename
-            )
+            # Fail fast: if the LLM failed/timed out on a previous chunk, don't wait 15s per chunk.
+            if llm_failed:
+                # Force fallback without making API calls
+                from app.extraction import extract_facts_from_chunk_mock
+                valid_facts, rejected_list = extract_facts_from_chunk_mock(c_text, p_num, doc_filename=doc_filename)
+                method = "fallback"
+                warnings = ["LLM API previously failed. Using fallback extractor for remaining chunks."]
+            else:
+                valid_facts, rejected_list, method, warnings = extract_facts_from_chunk(
+                    c_text, p_num, api_key=api_key, model=model, doc_filename=doc_filename
+                )
+                if method == "fallback" and any("LLM" in w for w in warnings):
+                    llm_failed = True
             
             extraction_methods.append(method)
             combined_warnings.extend(warnings)
