@@ -1,8 +1,9 @@
 import urllib.request
 import urllib.parse
 import json
+import os
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 
 def get(path):
     req = urllib.request.Request(f"{BASE_URL}{path}")
@@ -35,7 +36,6 @@ print("Docs count after clear:", len(docs))
 assert len(docs) == 0
 
 print("=== STEP 2 & 3: List starter dataset files ===")
-import os
 pdf_dir = os.path.join("starter-datasets", "starter-datasets", "delhivery")
 files = [f for f in os.listdir(pdf_dir) if f.endswith(".pdf")]
 print("Starter dataset PDFs found:", files)

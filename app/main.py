@@ -242,17 +242,17 @@ def extract_facts_for_document(doc_id: str, api_key: Optional[str] = Query(None)
             cursor.execute(
                 """
                 INSERT INTO facts (
-                    document_id, chunk_id, subject, entity, metric, predicate, value, numeric_value, unit,
-                    normalized_value, normalized_unit, period, as_of_date, scope, qualifiers,
+                    document_id, chunk_id, subject, entity, subject_entity, source_organization, metric, predicate, value, numeric_value, unit,
+                    normalized_value, normalized_unit, period, period_scope, estimate_vintage, index_base_year, index_base_value, as_of_date, scope, qualifiers,
                     raw_quote, page, extraction_confidence, grounding_confidence, value_binding_confidence,
                     final_confidence, value_type, is_numeric, value_source_span, metric_source_span,
                     temporal_source_span, extraction_method, binding_method, pipeline_version, validation_status, validation_notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    doc_id, c_id, subj, ent, f.get("metric", "General Assertion"),
+                    doc_id, c_id, subj, ent, f.get("subject_entity"), f.get("source_organization"), f.get("metric", "General Assertion"),
                     f.get("predicate", "was reported as"), f.get("value"), f.get("numeric_value"), f.get("unit"),
-                    f.get("normalized_value"), f.get("normalized_unit"), f.get("period"), f.get("as_of_date"),
+                    f.get("normalized_value"), f.get("normalized_unit"), f.get("period"), f.get("period_scope"), f.get("estimate_vintage"), f.get("index_base_year"), f.get("index_base_value"), f.get("as_of_date"),
                     f.get("scope"), f.get("qualifiers"), f.get("raw_quote"), f.get("page"),
                     f.get("extraction_confidence", 0.9), f.get("grounding_confidence", 1.0),
                     f.get("value_binding_confidence", 1.0), f.get("final_confidence", 0.9),

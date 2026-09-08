@@ -209,7 +209,7 @@ def test_series_alignment_binds_adjusted_ebitda_fy2020():
     adj_fy20 = next(f for f in facts if f["metric"] == "EBITDA Margin" and f["period"] == "FY 2020")
     assert "-9.11" in str(adj_fy20["value"])
     assert adj_fy20["normalized_value"] == -9.11
-    assert adj_fy20["binding_method"] == "series_alignment"
+    assert adj_fy20["binding_method"] == "table_series_alignment"
 
 def test_series_alignment_binds_289_to_fy2021():
     chunk = """
@@ -221,7 +221,7 @@ def test_series_alignment_binds_289_to_fy2021():
     vol_fy21 = next(f for f in facts if "express parcel" in f["metric"].lower() and f["period"] == "FY 2021")
     assert "289" in str(vol_fy21["value"])
     assert vol_fy21["normalized_value"] == 289.0
-    assert vol_fy21["binding_method"] == "series_alignment"
+    assert vol_fy21["binding_method"] == "table_series_alignment"
 
 def test_period_mismatch_prevents_corroboration():
     fact_a = {
@@ -247,4 +247,3 @@ def test_generic_seller_table_extraction():
     seller_fact = next(f for f in facts if f["entity"] == "CA Swift Investments")
     assert seller_fact["metric"] in ("Offer for Sale Amount", "Shares Offered for Sale")
     assert seller_fact["binding_method"] == "table_cell"
-

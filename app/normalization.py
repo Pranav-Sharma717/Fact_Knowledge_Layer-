@@ -153,7 +153,14 @@ def normalize_fact(fact: Dict[str, Any]) -> Dict[str, Any]:
         norm_unit = "%"
         val_type = ROLE_PERCENT
     elif "parcel" in combined_val_unit or "order" in combined_val_unit or "shipment" in combined_val_unit:
-        norm_unit = "parcels"
+        # Retain the stated operational scale instead of silently converting
+        # it to an unlabelled base count.  This keeps 289.20 million parcels
+        # directly comparable with 289 million parcels.
+        if detected_mag:
+            norm_val = num_val
+            norm_unit = f"{detected_mag}_parcels"
+        else:
+            norm_unit = "parcels"
         val_type = ROLE_COUNT
     elif "employee" in combined_val_unit or "headcount" in combined_val_unit or "worker" in combined_val_unit:
         norm_unit = "employees"

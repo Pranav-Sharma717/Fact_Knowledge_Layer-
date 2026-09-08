@@ -9,7 +9,7 @@ from app.normalization import normalize_fact, parse_raw_numeric
 from app.validation import validate_fact_candidate, is_header_or_unit_label, UNIT_KEYWORDS, GENERIC_METRICS
 from app.number_classifier import (
     classify_number_role, is_metric_value_role, detect_navigation_reference,
-    ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT, ROLE_YEAR
+    detect_index_base_metadata, ROLE_MONEY, ROLE_PERCENT, ROLE_SHARE_COUNT, ROLE_COUNT, ROLE_YEAR
 )
 
 load_dotenv()
@@ -82,6 +82,8 @@ def normalize_period_str(period: Optional[str]) -> Optional[str]:
     if not period or period.lower() in {"source document", "reporting period", "unspecified", "null"}:
         return None
     p = period.upper().strip()
+    p = re.sub(r'\bFISCAL\s*(\d{4})\b', r'FY \1', p)
+    p = re.sub(r'\bFISCAL\s*(\d{2})\b', r'FY 20\1', p)
     p = re.sub(r'\bFY\s*(\d{2})\b', r'FY 20\1', p)
     p = re.sub(r'\bFY\s*(\d{4})\b', r'FY \1', p)
     return p
@@ -92,12 +94,38 @@ def infer_doc_entity(doc_filename: str) -> str:
     if "delhivery" in fn:
         return "Delhivery Limited"
     elif "rbi" in fn:
-        return "Reserve Bank of India"
+        return "India"
     elif "economic-survey" in fn or "macroeconomy" in fn:
-        return "India Macroeconomy"
+        return "India"
     elif "imf" in fn:
         return "IMF / India"
     return "Document Entity"
+
+def infer_source_organization(doc_filename: str) -> Optional[str]:
+    name = (doc_filename or "").lower()
+    if "rbi" in name:
+        return "Reserve Bank of India"
+    if "economic-survey" in name or "economic_survey" in name:
+        return "Ministry of Finance, Government of India"
+    if "delhivery" in name:
+        return "Delhivery Limited"
+    return None
+
+def resolve_period_scope(text: str) -> Optional[str]:
+    clean = (text or "").lower()
+    if re.search(r'april\s*[-–to ]+\s*december|apr(?:il)?\s*[-–]\s*dec', clean):
+        return "APR_DEC"
+    if "full year" in clean or "annual" in clean or re.search(r'fy\s*\d{2,4}', clean):
+        return "FULL_YEAR"
+    return None
+
+def resolve_estimate_vintage(text: str) -> Optional[str]:
+    clean = (text or "").lower()
+    if "first advance estimate" in clean:
+        return "FIRST_ADVANCE_ESTIMATE"
+    if "second advance estimate" in clean:
+        return "SECOND_ADVANCE_ESTIMATE"
+    return None
 
 def verify_grounding(raw_quote: str, chunk_text: str) -> float:
     """Verifies evidence grounding by checking if raw_quote matches chunk_text."""
@@ -185,63 +213,60 @@ def extract_series_alignment_candidates(chunk_text: str, doc_filename: str = "")
             
         norm_periods = [normalize_period_str(p) for p in periods]
         
-        for offset in range(-2, 5):
-            target_idx = i + offset
-            if target_idx < 0 or target_idx >= len(lines) or target_idx == i:
+        # A table commonly has a metric label *above* its period header and
+        # an unlabeled numeric row *below* it.  Resolve that three-line shape
+        # before attempting ordinary line extraction, rather than guessing
+        # from numeric position alone.
+        metric_line = next((lines[k] for k in range(max(0, i - 3), i)
+                            if any(re.search(p, lines[k], re.I) for p, _, _ in KNOWN_METRIC_PATTERNS)), None)
+        # Some PDF extractors put the row label and its values together
+        # directly after the period header.
+        if not metric_line:
+            metric_line = next((lines[k] for k in range(i + 1, min(len(lines), i + 4))
+                                if any(re.search(p, lines[k], re.I) for p, _, _ in KNOWN_METRIC_PATTERNS)), None)
+        value_line = next((lines[k] for k in range(i + 1, min(len(lines), i + 4))
+                           if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)), None)
+        # MuPDF sometimes emits the period labels after the values in a chart.
+        if not value_line:
+            value_line = next((lines[k] for k in range(max(0, i - 3), i)
+                               if len(re.findall(r'(?<![A-Za-z])[-+]?\d+(?:,\d+)*(?:\.\d+)?%?', lines[k])) >= len(norm_periods)), None)
+        if not metric_line or not value_line:
+            continue
+        metric_match = next(((name, role) for pattern, name, role in KNOWN_METRIC_PATTERNS
+                             if re.search(pattern, metric_line, re.I)), None)
+        if not metric_match:
+            continue
+        matching_metric, expected_role = metric_match
+        num_tokens = re.findall(r'(\(\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?\s*%?\s*\)|[-+]?\d+(?:,\d+)*(?:\.\d+)?%?)', value_line)
+        if len(num_tokens) != len(norm_periods):
+            continue
+        for idx, raw_num_str in enumerate(num_tokens):
+            parsed_val = parse_raw_numeric(raw_num_str)
+            if parsed_val is None:
                 continue
-            row_line = lines[target_idx]
-            
-            clean_row = row_line.lower()
-            matching_metric = None
-            for pattern, metric_name, _ in KNOWN_METRIC_PATTERNS:
-                if re.search(pattern, clean_row):
-                    matching_metric = metric_name
-                    break
-            
-            if not matching_metric:
+            role, _ = classify_number_role(f"{parsed_val:g}", raw_num_str, full_line=value_line)
+            if not is_metric_value_role(role) and "%" not in raw_num_str:
                 continue
-                
-            num_tokens = re.findall(r'(\(\s*(?:₹|\$|inr|usd|rs\.?)?\s*[-+]?\d+(?:,\d+)*(?:\.\d+)?\s*\%?\s*\)|[-+]?\d+(?:,\d+)*(?:\.\d+)?%?)', row_line, re.IGNORECASE)
-            valid_nums = []
-            for num in num_tokens:
-                parsed = parse_raw_numeric(num)
-                if parsed is not None:
-                    if any(p and str(int(abs(parsed))) in p for p in norm_periods if abs(parsed) >= 2000):
-                        continue
-                    valid_nums.append((num, parsed))
-                    
-            if len(valid_nums) == len(norm_periods):
-                for idx, (raw_num_str, parsed_val) in enumerate(valid_nums):
-                    period_val = norm_periods[idx]
-                    role, _ = classify_number_role(num_str=f"{parsed_val:g}", raw_val=raw_num_str, full_line=row_line)
-                    
-                    if not is_metric_value_role(role) and "%" not in raw_num_str and "(" not in raw_num_str:
-                        continue
-                        
-                    unit_match = re.search(r'(million|billion|crore|lakh|%|percent|shares|parcels|orders|employees)', raw_num_str, re.IGNORECASE)
-                    if not unit_match:
-                        unit_match = re.search(r'(million|billion|crore|lakh|%|percent|shares|parcels|orders|employees)', row_line, re.IGNORECASE)
-                    unit_found = unit_match.group(1) if unit_match else None
-                    
-                    display_val = raw_num_str.strip()
-                    if parsed_val < 0 and not display_val.startswith("-") and not display_val.startswith("("):
-                        display_val = f"-{display_val}"
-                    elif "(" in display_val and ")" in display_val:
-                        display_val = f"-{re.sub(r'[\(\)]', '', display_val).strip()}"
-
-                    candidates.append({
-                        "entity": default_entity,
-                        "metric": matching_metric,
-                        "predicate": "was reported as",
-                        "value": display_val,
-                        "unit": unit_found or ("%" if "%" in raw_num_str else None),
-                        "period": period_val,
-                        "raw_quote": f"{matching_metric}: {display_val} for {period_val} (Source Line: {row_line[:60]})",
-                        "binding_method": "series_alignment",
-                        "value_binding_confidence": 0.95,
-                        "extraction_confidence": 0.90,
-                        "extraction_method": "fallback"
-                    })
+            unit_match = re.search(r'(million|billion|crore|lakh|%|percent|shares|parcels|orders|employees)', f"{metric_line} {value_line}", re.I)
+            display_val = raw_num_str.strip()
+            if display_val.startswith("("):
+                display_val = f"-{display_val[1:-1].strip()}"
+            unit_found = unit_match.group(1) if unit_match else ("%" if expected_role == ROLE_PERCENT else None)
+            if unit_found and "express parcel" in matching_metric.lower() and unit_found.lower() in {"million", "billion", "thousand"}:
+                unit_found = f"{unit_found} parcels"
+            candidates.append({
+                "entity": default_entity,
+                "metric": matching_metric,
+                "predicate": "was reported as",
+                "value": display_val,
+                "unit": unit_found,
+                "period": norm_periods[idx],
+                "raw_quote": f"{metric_line}\n{line}\n{value_line}",
+                "binding_method": "table_series_alignment",
+                "value_binding_confidence": 0.98,
+                "extraction_confidence": 0.92,
+                "extraction_method": "fallback"
+            })
 
     return candidates
 
@@ -359,6 +384,15 @@ def extract_facts_from_chunk_mock(
     valid_facts = []
 
     for cand in candidates:
+        quote = cand.get("raw_quote", "")
+        cand["subject_entity"] = cand.get("subject_entity") or cand.get("entity") or infer_doc_entity(doc_filename)
+        cand["source_organization"] = cand.get("source_organization") or infer_source_organization(doc_filename)
+        cand["source_document"] = doc_filename or None
+        cand["period_scope"] = cand.get("period_scope") or resolve_period_scope(quote)
+        cand["estimate_vintage"] = cand.get("estimate_vintage") or resolve_estimate_vintage(quote)
+        index_base = detect_index_base_metadata(quote)
+        if index_base:
+            cand.update(index_base)
         norm = normalize_fact(cand)
         cand.update({
             "numeric_value": norm["numeric_value"],
@@ -366,7 +400,7 @@ def extract_facts_from_chunk_mock(
             "normalized_unit": norm["normalized_unit"],
             "value_type": norm["value_type"],
             "is_numeric": norm["numeric_value"] is not None,
-            "subject": cand.get("entity"),
+            "subject": cand.get("subject_entity"),
             "binding_method": cand.get("binding_method", "sentence_direct")
         })
         

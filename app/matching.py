@@ -62,8 +62,8 @@ def calculate_comparability_score(fact_a: Dict[str, Any], fact_b: Dict[str, Any]
     passed = []
     failed = []
 
-    entity_a = (fact_a.get("entity") or "").lower().strip()
-    entity_b = (fact_b.get("entity") or "").lower().strip()
+    entity_a = (fact_a.get("subject_entity") or fact_a.get("entity") or "").lower().strip()
+    entity_b = (fact_b.get("subject_entity") or fact_b.get("entity") or "").lower().strip()
     metric_a = (fact_a.get("metric") or "").lower().strip()
     metric_b = (fact_b.get("metric") or "").lower().strip()
     type_a = fact_a.get("value_type", "UNKNOWN")
@@ -131,7 +131,8 @@ def find_candidate_pairs(
         return []
         
     num_facts = len(facts)
-    candidate_pairs = []
+    exact_pairs = []
+    fuzzy_pairs = []
     seen_pairs = set()
 
     for i in range(num_facts):
@@ -151,10 +152,17 @@ def find_candidate_pairs(
             if comp_score < 0.50:
                 continue
                 
-            candidate_pairs.append((f_a, f_b, comp_score, passed_gates))
+            pair = (f_a, f_b, comp_score, passed_gates)
+            exact_block = (
+                (f_a.get("subject_entity") or f_a.get("entity")) == (f_b.get("subject_entity") or f_b.get("entity"))
+                and canonicalize_metric(f_a.get("metric", "")) == canonicalize_metric(f_b.get("metric", ""))
+                and f_a.get("value_type") == f_b.get("value_type")
+            )
+            (exact_pairs if exact_block else fuzzy_pairs).append(pair)
             
-    candidate_pairs.sort(key=lambda x: x[2], reverse=True)
-    return candidate_pairs[:max_candidates]
+    fuzzy_pairs.sort(key=lambda x: x[2], reverse=True)
+    # Exact semantic blocks are never subject to the global discovery cap.
+    return exact_pairs + fuzzy_pairs[:max(0, max_candidates - len(exact_pairs))]
 
 JUDGE_PROMPT = """You are a rigorous financial & macroeconomic fact-checking engine.
 Analyze two extracted facts from different documents and evaluate their relationship.
@@ -222,6 +230,10 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
     unit_b = (fact_b.get("normalized_unit") or fact_b.get("unit") or "").upper()
     period_a = (fact_a.get("period") or "").strip().lower()
     period_b = (fact_b.get("period") or "").strip().lower()
+    scope_a = (fact_a.get("period_scope") or "").strip().upper()
+    scope_b = (fact_b.get("period_scope") or "").strip().upper()
+    vintage_a = (fact_a.get("estimate_vintage") or "").strip().upper()
+    vintage_b = (fact_b.get("estimate_vintage") or "").strip().upper()
     computable = can_compute_delta(fact_a, fact_b)
 
     if val_a is not None and val_b is not None and computable:
@@ -232,6 +244,25 @@ def judge_relationship_mock(fact_a: Dict[str, Any], fact_b: Dict[str, Any]) -> D
         # Period Compatibility Check (User Review Fix 2 & 4)
         is_same_period = (period_a and period_b and period_a == period_b)
         is_period_diff = (period_a and period_b and period_a != period_b)
+
+        if is_same_period and scope_a and scope_b and scope_a != scope_b:
+            return {
+                "relationship": TAXONOMY_TEMPORAL_COMPARISON,
+                "taxonomy_category": TAXONOMY_TEMPORAL_COMPARISON,
+                "reasoning": f"Same reporting year but incompatible scopes ({scope_a} vs {scope_b}); values are not a contradiction.",
+                "confidence_delta": 0.85, "comparison_delta": pct_delta,
+                "can_compute_delta": True, "reconciliation_type": "SCOPE_PERIOD_DIFFERENCE",
+                "match_checklist": passed_gates + ["ℹ Scope/period difference"]
+            }
+
+        if is_same_period and vintage_a and vintage_b and vintage_a != vintage_b:
+            return {
+                "relationship": "RECONCILED", "taxonomy_category": TAXONOMY_RECONCILED_SCOPE,
+                "reasoning": f"Different estimate vintages ({vintage_a} vs {vintage_b}) explain the apparent discrepancy.",
+                "confidence_delta": 0.92, "comparison_delta": pct_delta,
+                "can_compute_delta": True, "reconciliation_type": "ESTIMATE_REVISION",
+                "match_checklist": passed_gates + ["✓ Estimate revision context"]
+            }
 
         # 1. Same metric across different periods -> TEMPORAL_COMPARISON (User Review Fix 4)
         if is_period_diff:

@@ -31,6 +31,8 @@ class FactItem(BaseModel):
     document_id: str
     chunk_id: int
     entity: str
+    subject_entity: Optional[str] = None
+    source_organization: Optional[str] = None
     metric: str
     predicate: str
     value: str
@@ -39,6 +41,10 @@ class FactItem(BaseModel):
     normalized_value: Optional[float] = None
     normalized_unit: Optional[str] = None
     period: Optional[str] = None
+    period_scope: Optional[str] = None
+    estimate_vintage: Optional[str] = None
+    index_base_year: Optional[int] = None
+    index_base_value: Optional[int] = None
     as_of_date: Optional[str] = None
     scope: Optional[str] = None
     qualifiers: Optional[str] = None
