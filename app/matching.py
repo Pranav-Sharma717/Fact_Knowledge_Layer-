@@ -166,7 +166,8 @@ def find_candidate_pairs(
         return []
         
     num_facts = len(facts)
-    scored_pairs = []
+    priority_pairs = []
+    fuzzy_pairs = []
     seen_pairs = set()
 
     for i in range(num_facts):
@@ -199,6 +200,12 @@ def find_candidate_pairs(
             s_a = (f_a.get("period_scope") or f_a.get("scope") or "").strip().upper()
             s_b = (f_b.get("period_scope") or f_b.get("scope") or "").strip().upper()
 
+            is_exact_block = (
+                canon_a == canon_b
+                and canon_a not in {"unspecified_metric", "general_metric"}
+                and (f_a.get("subject_entity") or f_a.get("entity")) == (f_b.get("subject_entity") or f_b.get("entity"))
+            )
+
             priority = 0.0
             if canon_a == canon_b and canon_a not in {"unspecified_metric", "general_metric"}:
                 priority += 40.0
@@ -214,11 +221,18 @@ def find_candidate_pairs(
                     priority += 20.0
             
             pair = (f_a, f_b, comp_score, passed_gates)
-            scored_pairs.append((priority, comp_score, pair))
+            if is_exact_block:
+                priority_pairs.append((priority, comp_score, pair))
+            else:
+                fuzzy_pairs.append((comp_score, pair))
             
-    # Sort pairs by priority first, then comparability score
-    scored_pairs.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    return [p[2] for p in scored_pairs[:max_candidates]]
+    # Sort priority pairs by priority score and comparability score
+    priority_pairs.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    fuzzy_pairs.sort(key=lambda x: x[0], reverse=True)
+
+    exact_final = [p[2] for p in priority_pairs]
+    remaining_capacity = max(0, max_candidates - len(exact_final))
+    return exact_final + [p[1] for p in fuzzy_pairs[:remaining_capacity]]
 
 JUDGE_PROMPT = """You are a rigorous financial & macroeconomic fact-checking engine.
 Analyze two extracted facts from different documents and evaluate their relationship.

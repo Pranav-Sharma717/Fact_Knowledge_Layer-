@@ -52,13 +52,12 @@ class TestSemanticRegressions(unittest.TestCase):
         b = {"id": 2, "document_id": "d2", "subject_entity": "India", "metric": "CPI", "value": "4.6%", "normalized_value": 4.6, "unit": "%", "normalized_unit": "%", "value_type": "PERCENT", "period": "FY2024-25", "period_scope": "FULL_YEAR"}
         self.assertEqual(judge_relationship_mock(a, b)["relationship"], "TEMPORAL_COMPARISON")
 
-    def test_candidate_discovery_cap_and_subject_entity(self):
+    def test_source_org_not_subject_entity_and_exact_block_not_capped(self):
         base = {"metric": "headline CPI inflation", "value": "5.4%", "unit": "%", "normalized_value": 5.4, "normalized_unit": "%", "value_type": "PERCENT", "period": "FY2023-24"}
         facts = [dict(base, id=1, document_id="economic", subject_entity="India", entity="Ministry of Finance")]
         facts += [dict(base, id=i + 2, document_id=f"rbi-{i}", subject_entity="India", entity="Reserve Bank of India") for i in range(60)]
-        pairs = find_candidate_pairs(facts, max_candidates=10)
-        self.assertLessEqual(len(pairs), 10)
-        self.assertGreater(len(pairs), 0)
+        pairs = find_candidate_pairs(facts, max_candidates=1)
+        self.assertGreater(len(pairs), 1)
 
 if __name__ == "__main__":
     unittest.main()

@@ -492,6 +492,15 @@ def extract_facts_from_chunk_mock(
                 "rejection_reason": "Unit header or bare table title detected without an associated metric/value."
             })
             continue
+        if re.search(r'\[\s*\d{4}(?:-\d{2,4})?\s*=\s*\d+\s*\]', line):
+            rejected_extractions.append({
+                "page": page_number,
+                "candidate_text": line[:100],
+                "attempted_extraction": json.dumps({"line": line[:100], "metric": "CPI-IW", "value": "100"}),
+                "failure_type": "STRUCTURAL_INDEX_METADATA",
+                "rejection_reason": "Structural index series metadata: leading number is a row identifier, year is an index base year, and 100 is an index base value. None is an inflation observation."
+            })
+            continue
             
         line_cands = extract_multi_value_line_candidates(line, doc_filename=doc_filename)
         candidates.extend(line_cands)

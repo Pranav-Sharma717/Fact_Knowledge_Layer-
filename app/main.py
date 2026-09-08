@@ -705,7 +705,9 @@ def get_submission_cases():
     reconc_case = reconc_candidates[0] if reconc_candidates else None
     temporal_case = temporal_candidates[0] if temporal_candidates else None
     
-    failure_case = next((rj for rj in rejected if rj.failure_type in {"TABLE_HEADER_WITHOUT_VALUE", "SECTION_IDENTIFIER_AS_VALUE"} or rj.candidate_text == "(₹ in million)"), None)
+    failure_case = next((rj for rj in rejected if rj.failure_type == "STRUCTURAL_INDEX_METADATA"), None)
+    if not failure_case:
+        failure_case = next((rj for rj in rejected if rj.failure_type in {"TABLE_HEADER_WITHOUT_VALUE", "SECTION_IDENTIFIER_AS_VALUE"} or rj.candidate_text == "(₹ in million)"), None)
     if not failure_case and rejected:
         failure_case = rejected[0]
 
